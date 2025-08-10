@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Asteroids - Space Adventure</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        
+        <div id="ui-overlay">
+            <div id="score-display">
+                <div class="score-label">SCORE</div>
+                <div id="score">0</div>
+            </div>
+            
+            <div id="lives-display">
+                <div class="lives-label">LIVES</div>
+                <div id="lives"></div>
+            </div>
+            
+            <div id="wave-display">
+                <div class="wave-label">WAVE</div>
+                <div id="wave">1</div>
+            </div>
+            
+            <div id="powerup-display"></div>
+        </div>
+        
+        <div id="menu" class="menu-screen active">
+            <h1 class="game-title">ASTEROIDS</h1>
+            <div class="menu-subtitle">Space Adventure</div>
+            
+            <div class="menu-buttons">
+                <button id="startBtn" class="menu-btn">START GAME</button>
+                <button id="themesBtn" class="menu-btn">THEMES</button>
+                <button id="shipsBtn" class="menu-btn">SHIPS</button>
+                <button id="controlsBtn" class="menu-btn">CONTROLS</button>
+            </div>
+            
+            <div id="highScore" class="high-score">
+                HIGH SCORE: <span id="highScoreValue">0</span>
+            </div>
+        </div>
+        
+        <div id="themes-menu" class="menu-screen">
+            <h2>SELECT THEME</h2>
+            <div class="theme-grid">
+                <div class="theme-option" data-theme="space">
+                    <div class="theme-preview space-theme"></div>
+                    <div class="theme-name">Space</div>
+                </div>
+                <div class="theme-option" data-theme="neon">
+                    <div class="theme-preview neon-theme"></div>
+                    <div class="theme-name">Neon</div>
+                </div>
+                <div class="theme-option" data-theme="retro">
+                    <div class="theme-preview retro-theme"></div>
+                    <div class="theme-name">Retro</div>
+                </div>
+                <div class="theme-option" data-theme="dark">
+                    <div class="theme-preview dark-theme"></div>
+                    <div class="theme-name">Dark</div>
+                </div>
+            </div>
+            <button class="menu-btn back-btn">BACK</button>
+        </div>
+        
+        <div id="ships-menu" class="menu-screen">
+            <h2>SELECT SHIP</h2>
+            <div class="ship-grid">
+                <div class="ship-option" data-ship="classic">
+                    <canvas class="ship-preview" width="100" height="100"></canvas>
+                    <div class="ship-name">Classic</div>
+                </div>
+                <div class="ship-option" data-ship="fighter">
+                    <canvas class="ship-preview" width="100" height="100"></canvas>
+                    <div class="ship-name">Fighter</div>
+                </div>
+                <div class="ship-option" data-ship="speeder">
+                    <canvas class="ship-preview" width="100" height="100"></canvas>
+                    <div class="ship-name">Speeder</div>
+                </div>
+                <div class="ship-option" data-ship="tank">
+                    <canvas class="ship-preview" width="100" height="100"></canvas>
+                    <div class="ship-name">Tank</div>
+                </div>
+            </div>
+            <button class="menu-btn back-btn">BACK</button>
+        </div>
+        
+        <div id="controls-menu" class="menu-screen">
+            <h2>CONTROLS</h2>
+            <div class="controls-list">
+                <div class="control-item">
+                    <span class="control-key">↑</span>
+                    <span class="control-desc">Thrust Forward</span>
+                </div>
+                <div class="control-item">
+                    <span class="control-key">←→</span>
+                    <span class="control-desc">Rotate Ship</span>
+                </div>
+                <div class="control-item">
+                    <span class="control-key">SPACE</span>
+                    <span class="control-desc">Fire Weapons</span>
+                </div>
+                <div class="control-item">
+                    <span class="control-key">P</span>
+                    <span class="control-desc">Pause Game</span>
+                </div>
+                <div class="control-item">
+                    <span class="control-key">T</span>
+                    <span class="control-desc">Cycle Themes</span>
+                </div>
+                <div class="control-item">
+                    <span class="control-key">ESC</span>
+                    <span class="control-desc">Main Menu</span>
+                </div>
+            </div>
+            <button class="menu-btn back-btn">BACK</button>
+        </div>
+        
+        <div id="pause-menu" class="menu-screen">
+            <h2>PAUSED</h2>
+            <div class="menu-buttons">
+                <button id="resumeBtn" class="menu-btn">RESUME</button>
+                <button id="restartBtn" class="menu-btn">RESTART</button>
+                <button id="mainMenuBtn" class="menu-btn">MAIN MENU</button>
+            </div>
+        </div>
+        
+        <div id="game-over" class="menu-screen">
+            <h2>GAME OVER</h2>
+            <div class="final-score">
+                FINAL SCORE: <span id="finalScore">0</span>
+            </div>
+            <div class="menu-buttons">
+                <button id="playAgainBtn" class="menu-btn">PLAY AGAIN</button>
+                <button id="mainMenuBtn2" class="menu-btn">MAIN MENU</button>
+            </div>
+        </div>
+    </div>
+    
+    <script src="entities.js"></script>
+    <script src="effects.js"></script>
+    <script src="ui.js"></script>
+    <script src="sounds.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
