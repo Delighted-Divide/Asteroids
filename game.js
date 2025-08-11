@@ -28,6 +28,22 @@ class Game {
         this.lastShootTime = 0;
         this.shootCooldown = 200;
         
+        this.lastAsteroidSpawn = 0;
+        this.asteroidSpawnInterval = 5000;  // Spawn more frequently
+        this.minAsteroids = 5;  // Keep more asteroids minimum
+        this.maxAsteroids = 30;  // Allow more asteroids total
+        
+        this.aiMode = false;
+        this.aiPlayer = null;
+        this.aiStats = {
+            shotsFired: 0,
+            hits: 0,
+            accuracy: 0,
+            decisionsPerSecond: 0,
+            survivalTime: 0,
+            score: 0
+        };
+        
         this.init();
     }
     
@@ -77,12 +93,15 @@ class Game {
     }
     
     start() {
+        console.log('Starting normal game mode');
         this.gameState = 'playing';
         this.lives = 3;
         this.wave = 1;
         this.asteroidSpeed = 1;
+        this.aiMode = false;
         
         this.ship = new Ship(this.canvas.width / 2, this.canvas.height / 2, this.ui.currentShip);
+        console.log('Ship created:', this.ship);
         this.bullets = [];
         this.asteroids = [];
         this.powerUps = [];
@@ -94,8 +113,51 @@ class Game {
         this.waveTransition.start(1);
     }
     
+    startAIMode() {
+        this.gameState = 'playing';
+        this.lives = 3;
+        this.wave = 1;
+        this.asteroidSpeed = 1;
+        this.aiMode = true;
+        
+        // Check if AIPlayer exists
+        if (typeof AIPlayer === 'undefined') {
+            console.error('AIPlayer class not found! Check entities.js');
+            alert('AI Mode error: AIPlayer class not loaded');
+            return;
+        }
+        
+        this.aiPlayer = new AIPlayer(this.canvas.width / 2, this.canvas.height / 2, this.ui.currentShip);
+        this.ship = this.aiPlayer;
+        console.log('AI Mode started, ship created:', this.ship);
+        this.bullets = [];
+        this.asteroids = [];
+        this.powerUps = [];
+        this.boss = null;
+        this.powerUpActive = {};
+        
+        this.aiStats = {
+            shotsFired: 0,
+            hits: 0,
+            accuracy: 0,
+            decisionsPerSecond: 0,
+            survivalTime: Date.now(),
+            score: 0
+        };
+        
+        this.ui.reset();
+        this.ui.setAIMode(true);
+        this.createAsteroids(5);
+        this.waveTransition.start(1);
+    }
+    
     restart() {
-        this.start();
+        // Restart in the same mode we were in
+        if (this.aiMode) {
+            this.startAIMode();
+        } else {
+            this.start();
+        }
     }
     
     pause() {
@@ -161,13 +223,19 @@ class Game {
     handleInput() {
         if (!this.ship || !this.ship.alive) return;
         
-        if (this.keys['ArrowLeft']) {
+        // Debug: Log when keys are pressed
+        if (Object.keys(this.keys).some(k => this.keys[k])) {
+            console.log('Keys pressed:', Object.keys(this.keys).filter(k => this.keys[k]));
+        }
+        
+        // Support both Arrow keys and WASD
+        if (this.keys['ArrowLeft'] || this.keys['KeyA']) {
             this.ship.rotateLeft();
         }
-        if (this.keys['ArrowRight']) {
+        if (this.keys['ArrowRight'] || this.keys['KeyD']) {
             this.ship.rotateRight();
         }
-        if (this.keys['ArrowUp']) {
+        if (this.keys['ArrowUp'] || this.keys['KeyW']) {
             this.ship.setThrust(true);
             if (Math.random() < 0.3) {
                 this.particleSystem.createThrustParticles(
@@ -209,7 +277,11 @@ class Game {
     update() {
         if (this.gameState !== 'playing') return;
         
-        this.handleInput();
+        if (this.aiMode && this.aiPlayer) {
+            this.aiPlayer.makeDecisions(this.asteroids, this.boss, this.powerUps, this.canvas, this);
+        } else {
+            this.handleInput();
+        }
         
         if (this.ship && this.ship.alive) {
             this.ship.update(this.canvas);
@@ -250,6 +322,13 @@ class Game {
         this.checkCollisions();
         this.checkWaveComplete();
         this.spawnBoss();
+        this.maintainAsteroidCount();
+        
+        if (this.aiMode && this.aiPlayer) {
+            const timeSurvived = (Date.now() - this.aiStats.survivalTime) / 1000;
+            this.aiStats.decisionsPerSecond = this.aiPlayer.decisionsCount / timeSurvived;
+            this.ui.updateAIStats(this.aiStats);
+        }
     }
     
     checkCollisions() {
@@ -262,6 +341,10 @@ class Game {
                 
                 if (dist < bullet.radius + asteroid.radius) {
                     this.bullets.splice(i, 1);
+                    
+                    if (this.aiMode) {
+                        this.aiStats.hits++;
+                    }
                     
                     const fragments = asteroid.break();
                     this.asteroids.splice(j, 1);
@@ -281,6 +364,11 @@ class Game {
                 const dist = Math.hypot(bullet.x - this.boss.x, bullet.y - this.boss.y);
                 if (dist < bullet.radius + this.boss.radius) {
                     this.bullets.splice(i, 1);
+                    
+                    if (this.aiMode) {
+                        this.aiStats.hits++;
+                    }
+                    
                     this.boss.takeDamage(bullet.damage);
                     this.particleSystem.createBulletImpact(bullet.x, bullet.y);
                     this.soundManager.play('hit');
@@ -381,10 +469,51 @@ class Game {
         this.ui.updateLives(this.lives);
         
         if (this.lives > 0) {
-            this.ship = new Ship(this.canvas.width / 2, this.canvas.height / 2, this.ui.currentShip);
+            // Create the correct ship type based on game mode
+            if (this.aiMode) {
+                this.aiPlayer = new AIPlayer(this.canvas.width / 2, this.canvas.height / 2, this.ui.currentShip);
+                this.ship = this.aiPlayer;
+                console.log('AI respawned');
+            } else {
+                this.ship = new Ship(this.canvas.width / 2, this.canvas.height / 2, this.ui.currentShip);
+            }
         } else {
             this.ship.alive = false;
             this.gameOver();
+        }
+    }
+    
+    maintainAsteroidCount() {
+        const now = Date.now();
+        const largeAsteroids = this.asteroids.filter(a => a.size === 'large').length;
+        
+        if (this.asteroids.length < this.minAsteroids || 
+            (now - this.lastAsteroidSpawn > this.asteroidSpawnInterval && 
+             this.asteroids.length < this.maxAsteroids && 
+             largeAsteroids < 5)) {  // Allow more large asteroids
+            
+            this.lastAsteroidSpawn = now;
+            
+            const edge = Math.floor(Math.random() * 4);
+            let x, y;
+            
+            switch(edge) {
+                case 0: x = -50; y = Math.random() * this.canvas.height; break;
+                case 1: x = this.canvas.width + 50; y = Math.random() * this.canvas.height; break;
+                case 2: x = Math.random() * this.canvas.width; y = -50; break;
+                case 3: x = Math.random() * this.canvas.width; y = this.canvas.height + 50; break;
+            }
+            
+            const asteroid = new Asteroid(x, y, 40, 'large');
+            asteroid.vx = (Math.random() - 0.5) * 4 * this.asteroidSpeed;
+            asteroid.vy = (Math.random() - 0.5) * 4 * this.asteroidSpeed;
+            
+            const towardsCenterX = (this.canvas.width / 2 - x) / this.canvas.width;
+            const towardsCenterY = (this.canvas.height / 2 - y) / this.canvas.height;
+            asteroid.vx += towardsCenterX * 2;
+            asteroid.vy += towardsCenterY * 2;
+            
+            this.asteroids.push(asteroid);
         }
     }
     
@@ -395,7 +524,7 @@ class Game {
             this.asteroidSpeed += 0.1;
             this.bossSpawnChance += 0.001;
             
-            this.createAsteroids(Math.min(4 + this.wave, 12));
+            this.createAsteroids(Math.min(5 + this.wave, 15));  // More asteroids per wave
             this.waveTransition.start(this.wave);
             this.soundManager.play('waveComplete');
             

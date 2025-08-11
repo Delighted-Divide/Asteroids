@@ -7,6 +7,7 @@ class UI {
         this.currentTheme = 'space';
         this.currentShip = 'classic';
         this.powerUps = {};
+        this.aiMode = false;
         this.initializeUI();
     }
     
@@ -23,6 +24,14 @@ class UI {
             this.hideAllMenus();
             window.game.start();
         });
+        
+        const aiBtn = document.getElementById('aiModeBtn');
+        if (aiBtn) {
+            aiBtn.addEventListener('click', () => {
+                this.hideAllMenus();
+                window.game.startAIMode();
+            });
+        }
         
         document.getElementById('themesBtn').addEventListener('click', () => {
             this.showMenu('themes-menu');
@@ -348,5 +357,28 @@ class UI {
         Object.keys(this.powerUps).forEach(type => {
             this.removePowerUp(type);
         });
+    }
+    
+    setAIMode(enabled) {
+        this.aiMode = enabled;
+        const aiStatsDisplay = document.getElementById('ai-stats');
+        if (aiStatsDisplay) {
+            aiStatsDisplay.style.display = enabled ? 'block' : 'none';
+        }
+    }
+    
+    updateAIStats(stats) {
+        if (!this.aiMode) return;
+        
+        const accuracy = stats.shotsFired > 0 ? (stats.hits / stats.shotsFired * 100).toFixed(1) : 0;
+        const survivalTime = Math.floor((Date.now() - stats.survivalTime) / 1000);
+        
+        const aiAccuracy = document.getElementById('ai-accuracy');
+        const aiDecisions = document.getElementById('ai-decisions');
+        const aiSurvival = document.getElementById('ai-survival');
+        
+        if (aiAccuracy) aiAccuracy.textContent = `${accuracy}%`;
+        if (aiDecisions) aiDecisions.textContent = `${Math.floor(stats.decisionsPerSecond)}/s`;
+        if (aiSurvival) aiSurvival.textContent = `${survivalTime}s`;
     }
 }

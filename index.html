@@ -27,6 +27,27 @@
             </div>
             
             <div id="powerup-display"></div>
+            
+            <div id="ai-stats" style="display: none;">
+                <div class="ai-stats-container">
+                    <div class="ai-stat-item">
+                        <div class="ai-stat-label">AI MODE</div>
+                        <div class="ai-stat-value">ACTIVE</div>
+                    </div>
+                    <div class="ai-stat-item">
+                        <div class="ai-stat-label">ACCURACY</div>
+                        <div id="ai-accuracy" class="ai-stat-value">0%</div>
+                    </div>
+                    <div class="ai-stat-item">
+                        <div class="ai-stat-label">DECISIONS/SEC</div>
+                        <div id="ai-decisions" class="ai-stat-value">0/s</div>
+                    </div>
+                    <div class="ai-stat-item">
+                        <div class="ai-stat-label">SURVIVAL TIME</div>
+                        <div id="ai-survival" class="ai-stat-value">0s</div>
+                    </div>
+                </div>
+            </div>
         </div>
         
         <div id="menu" class="menu-screen active">
@@ -35,6 +56,7 @@
             
             <div class="menu-buttons">
                 <button id="startBtn" class="menu-btn">START GAME</button>
+                <button id="aiModeBtn" class="menu-btn">AI MODE</button>
                 <button id="themesBtn" class="menu-btn">THEMES</button>
                 <button id="shipsBtn" class="menu-btn">SHIPS</button>
                 <button id="controlsBtn" class="menu-btn">CONTROLS</button>
@@ -95,11 +117,11 @@
             <h2>CONTROLS</h2>
             <div class="controls-list">
                 <div class="control-item">
-                    <span class="control-key">↑</span>
+                    <span class="control-key">↑ / W</span>
                     <span class="control-desc">Thrust Forward</span>
                 </div>
                 <div class="control-item">
-                    <span class="control-key">←→</span>
+                    <span class="control-key">←→ / A D</span>
                     <span class="control-desc">Rotate Ship</span>
                 </div>
                 <div class="control-item">

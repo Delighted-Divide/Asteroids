@@ -154,6 +154,21 @@ class Ship {
         this.angle += this.rotationSpeed;
     }
     
+    // Smooth rotation for AI with proportional control
+    rotateToAngle(targetAngle, kP = 0.15) {
+        let angleDiff = targetAngle - this.angle;
+        
+        // Normalize angle difference to [-PI, PI]
+        while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+        while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+        
+        // Proportional controller with max turn rate
+        const turnRate = Math.min(Math.max(angleDiff * kP, -this.rotationSpeed * 1.5), this.rotationSpeed * 1.5);
+        this.angle += turnRate;
+        
+        return Math.abs(angleDiff) < 0.05; // Return true if we're close enough
+    }
+    
     setThrust(thrusting) {
         this.thrusting = thrusting;
     }
@@ -279,21 +294,33 @@ class Asteroid {
         const fragments = [];
         if (this.size === 'large') {
             for (let i = 0; i < 2; i++) {
-                fragments.push(new Asteroid(
-                    this.x + (Math.random() - 0.5) * this.radius,
-                    this.y + (Math.random() - 0.5) * this.radius,
+                const angle = (Math.PI * 2 * i / 2) + (Math.random() - 0.5) * 0.5;
+                const spread = this.radius * 0.8; // Closer together but still separated
+                const fragment = new Asteroid(
+                    this.x + Math.cos(angle) * spread,
+                    this.y + Math.sin(angle) * spread,
                     this.radius / 2,
                     'medium'
-                ));
+                );
+                // Inherit parent velocity and add moderate spread velocity
+                fragment.vx = this.vx + Math.cos(angle) * 2;
+                fragment.vy = this.vy + Math.sin(angle) * 2;
+                fragments.push(fragment);
             }
         } else if (this.size === 'medium') {
             for (let i = 0; i < 2; i++) {
-                fragments.push(new Asteroid(
-                    this.x + (Math.random() - 0.5) * this.radius,
-                    this.y + (Math.random() - 0.5) * this.radius,
+                const angle = (Math.PI * 2 * i / 2) + (Math.random() - 0.5) * 0.5;
+                const spread = this.radius * 0.8;
+                const fragment = new Asteroid(
+                    this.x + Math.cos(angle) * spread,
+                    this.y + Math.sin(angle) * spread,
                     this.radius / 2,
                     'small'
-                ));
+                );
+                // Inherit parent velocity and add moderate spread velocity
+                fragment.vx = this.vx + Math.cos(angle) * 2.5;
+                fragment.vy = this.vy + Math.sin(angle) * 2.5;
+                fragments.push(fragment);
             }
         }
         return fragments;
@@ -416,6 +443,408 @@ class Boss {
         this.health -= damage;
         if (this.health <= 0) {
             this.alive = false;
+        }
+    }
+}
+
+class AIPlayer extends Ship {
+    constructor(x, y, type = 'classic') {
+        super(x, y, type);
+        this.decisionCooldown = 0;
+        this.targetAsteroid = null;
+        this.avoidanceVector = { x: 0, y: 0 };
+        this.lastDecisionTime = Date.now();
+        this.lastUpdateTime = performance.now();
+        this.decisionsCount = 0;
+        this.dangerThreshold = 300;  // Much higher danger awareness
+        this.shootingAccuracy = 0.9;  // Better accuracy
+        this.reactionTime = 2;  // Faster reactions
+        this.targetPowerUp = null;
+        this.emergencyThreshold = 100;  // Emergency evasion distance
+        this.retreatAfterShot = false;  // Flag to retreat after shooting large asteroids
+        this.currentAction = null;  // Current action being executed
+        this.actionUtilities = {};  // Utility scores for actions
+    }
+    
+    // Calculate wrapped distance considering screen edges
+    wrappedDistance(targetX, targetY, canvas) {
+        const dx = [targetX - this.x, targetX - this.x - canvas.width, targetX - this.x + canvas.width];
+        const dy = [targetY - this.y, targetY - this.y - canvas.height, targetY - this.y + canvas.height];
+        
+        let minDist = Infinity;
+        let bestDx = 0, bestDy = 0;
+        
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                const dist = Math.sqrt(dx[i] * dx[i] + dy[j] * dy[j]);
+                if (dist < minDist) {
+                    minDist = dist;
+                    bestDx = dx[i];
+                    bestDy = dy[j];
+                }
+            }
+        }
+        
+        return { distance: minDist, dx: bestDx, dy: bestDy };
+    }
+    
+    makeDecisions(asteroids, boss, powerUps, canvas, game) {
+        this.decisionsCount++;
+        
+        // Calculate delta time
+        const now = performance.now();
+        const deltaTime = (now - this.lastUpdateTime) / 1000; // Convert to seconds
+        this.lastUpdateTime = now;
+        
+        // Reset keys at the START, not at the end
+        this.keys = {};
+        
+        const threats = this.assessThreats(asteroids, boss, game.bullets, canvas);
+        // Check for emergency threats (very close)
+        const emergencyThreats = threats.filter(t => t.distance < this.emergencyThreshold + (t.radius || 0));
+        // Check for immediate threats (approaching soon) - now using time in seconds
+        const immediateThreats = threats.filter(t => 
+            (t.timeToCollision < 1.5 && t.distance < this.dangerThreshold) || // 1.5 seconds
+            t.distance < this.emergencyThreshold + (t.radius || 0)
+        );
+        
+        // Calculate utility scores for each action
+        this.actionUtilities = {
+            evade: emergencyThreats.length * 0.5 + immediateThreats.length * 0.3,
+            avoid: immediateThreats.length * 0.2 + (threats.length > 5 ? 0.1 : 0),
+            hunt: threats.length > 0 && emergencyThreats.length === 0 ? 0.4 : 0,
+            collectPowerup: powerUps.length > 0 && immediateThreats.length < 2 ? 0.35 : 0,
+            patrol: threats.length === 0 ? 0.3 : 0
+        };
+        
+        // Add bullet threat weight
+        const bulletThreats = threats.filter(t => t.type === 'bullet' && t.timeToCollision < 1);
+        this.actionUtilities.evade += bulletThreats.length * 0.7;
+        
+        // Find the action with highest utility
+        const bestAction = Object.keys(this.actionUtilities).reduce((a, b) => 
+            this.actionUtilities[a] > this.actionUtilities[b] ? a : b
+        );
+        
+        // Debug AI decisions
+        if (this.decisionsCount % 60 === 0) {
+            console.log('AI Status:', {
+                action: bestAction,
+                utilities: this.actionUtilities,
+                threats: threats.length,
+                bulletThreats: bulletThreats.length,
+                immediateThreats: immediateThreats.length
+            });
+        }
+        
+        // Execute the best action (only one at a time for clarity)
+        this.currentAction = bestAction;
+        switch(bestAction) {
+            case 'evade':
+                this.emergencyEvade(emergencyThreats.length > 0 ? emergencyThreats : bulletThreats);
+                break;
+            case 'avoid':
+                this.avoidThreats(immediateThreats);
+                break;
+            case 'hunt':
+                // Only hunt if we're not in immediate danger
+                if (this.actionUtilities.evade < 0.3) {
+                    this.huntTargets(threats, boss, game, canvas);
+                }
+                break;
+            case 'collectPowerup':
+                if (!this.targetPowerUp) {
+                    this.targetPowerUp = this.findNearestPowerUp(powerUps, canvas);
+                }
+                if (this.targetPowerUp) {
+                    this.navigateToPowerUp(this.targetPowerUp, canvas);
+                }
+                break;
+            case 'patrol':
+                // Just drift for now
+                break;
+        }
+        
+        if (this.decisionCooldown <= 0) {
+            this.decisionCooldown = this.reactionTime;
+        }
+        this.decisionCooldown--;
+        
+        // Now execute movement with the keys that were set
+        this.executeMovement(game);
+    }
+    
+    assessThreats(asteroids, boss, bullets, canvas) {
+        const threats = [];
+        
+        // Assess asteroid threats with wrapped distances
+        asteroids.forEach(asteroid => {
+            const wrapped = this.wrappedDistance(asteroid.x, asteroid.y, canvas);
+            const dx = wrapped.dx;
+            const dy = wrapped.dy;
+            const distance = wrapped.distance;
+            
+            const relativeVx = asteroid.vx - this.vx;
+            const relativeVy = asteroid.vy - this.vy;
+            
+            const closingSpeed = (dx * relativeVx + dy * relativeVy) / distance;
+            const timeToCollision = closingSpeed > 0 ? distance / closingSpeed / 60 : Infinity; // Convert to seconds (60fps baseline)
+            
+            const futurePosX = asteroid.x + asteroid.vx * 30;
+            const futurePosY = asteroid.y + asteroid.vy * 30;
+            const futureWrapped = this.wrappedDistance(futurePosX, futurePosY, canvas);
+            
+            threats.push({
+                entity: asteroid,
+                distance,
+                timeToCollision,
+                futureDistance: futureWrapped.distance,
+                priority: (asteroid.radius * 2) / distance,
+                angle: Math.atan2(dy, dx),
+                radius: asteroid.radius,
+                type: 'asteroid'
+            });
+        });
+        
+        // Assess bullet threats (especially boss bullets)
+        if (bullets) {
+            bullets.filter(b => b.type === 'boss').forEach(bullet => {
+                const wrapped = this.wrappedDistance(bullet.x, bullet.y, canvas);
+                const distance = wrapped.distance;
+                
+                // Bullets are fast and small - very high priority
+                const speed = Math.sqrt(bullet.vx * bullet.vx + bullet.vy * bullet.vy);
+                const timeToCollision = distance / speed / 60; // seconds
+                
+                threats.push({
+                    entity: bullet,
+                    distance,
+                    timeToCollision,
+                    futureDistance: distance - speed * 0.5, // Bullet position in 0.5 seconds
+                    priority: 100 / distance, // Very high priority
+                    angle: Math.atan2(wrapped.dy, wrapped.dx),
+                    radius: bullet.radius,
+                    type: 'bullet'
+                });
+            });
+        }
+        
+        if (boss) {
+            const dx = boss.x - this.x;
+            const dy = boss.y - this.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            threats.push({
+                entity: boss,
+                distance,
+                timeToCollision: distance / 5,
+                futureDistance: distance,
+                priority: 1000 / distance,
+                angle: Math.atan2(dy, dx)
+            });
+        }
+        
+        return threats.sort((a, b) => b.priority - a.priority);
+    }
+    
+    emergencyEvade(threats) {
+        // In emergency, move directly away from the closest threat
+        const closestThreat = threats.sort((a, b) => a.distance - b.distance)[0];
+        
+        if (closestThreat) {
+            // Calculate escape angle (opposite direction from threat)
+            const escapeAngle = closestThreat.angle + Math.PI;
+            
+            // Use smooth rotation even in emergency
+            const aligned = this.rotateToAngle(escapeAngle, 0.25); // Higher kP for faster turn
+            
+            // Always thrust in emergency
+            this.keys = { ...this.keys, ArrowUp: true };
+            
+            // Only shoot if we're somewhat aligned and it won't slow our escape
+            if (aligned && this.actionUtilities.evade < 0.8) {
+                const facingThreat = Math.abs(this.normalizeAngle(closestThreat.angle - this.angle)) < Math.PI / 3;
+                if (facingThreat) {
+                    this.keys = { ...this.keys, Space: true };
+                }
+            }
+        }
+    }
+    
+    avoidThreats(threats) {
+        this.avoidanceVector = { x: 0, y: 0 };
+        
+        threats.forEach(threat => {
+            // Stronger avoidance for closer threats
+            const weight = (threat.radius + this.radius) / (threat.distance * threat.distance);
+            this.avoidanceVector.x -= Math.cos(threat.angle) * weight * 2000;
+            this.avoidanceVector.y -= Math.sin(threat.angle) * weight * 2000;
+        });
+        
+        const avoidAngle = Math.atan2(this.avoidanceVector.y, this.avoidanceVector.x);
+        const angleDiff = this.normalizeAngle(avoidAngle - this.angle);
+        
+        if (Math.abs(angleDiff) > 0.1) {
+            this.keys = { ...this.keys, [angleDiff > 0 ? 'ArrowRight' : 'ArrowLeft']: true };
+        }
+        
+        this.keys = { ...this.keys, ArrowUp: true };
+    }
+    
+    huntTargets(threats, boss, game, canvas) {
+        // Prefer smaller, closer asteroids as targets
+        let target = boss;
+        if (!target && threats.length > 0) {
+            // Sort by combination of distance and size (prefer small close ones)
+            const sortedThreats = threats.sort((a, b) => {
+                const aPriority = a.distance / 100 + (a.entity.size === 'large' ? 3 : a.entity.size === 'medium' ? 1 : 0);
+                const bPriority = b.distance / 100 + (b.entity.size === 'large' ? 3 : b.entity.size === 'medium' ? 1 : 0);
+                return aPriority - bPriority;
+            });
+            target = sortedThreats[0].entity;
+        }
+        
+        if (target) {
+            const leadTime = this.calculateLeadTime(target);
+            const predictedX = target.x + target.vx * leadTime;
+            const predictedY = target.y + target.vy * leadTime;
+            
+            const targetAngle = Math.atan2(predictedY - this.y, predictedX - this.x);
+            const angleDiff = this.normalizeAngle(targetAngle - this.angle);
+            const distance = Math.sqrt((target.x - this.x) ** 2 + (target.y - this.y) ** 2);
+            
+            if (Math.abs(angleDiff) > 0.05) {
+                this.keys = { ...this.keys, [angleDiff > 0 ? 'ArrowRight' : 'ArrowLeft']: true };
+            } else if (Math.abs(angleDiff) < 0.3) {
+                // Different shooting distances for different asteroid sizes
+                const minSafeDistance = target.size === 'large' ? 350 : target.size === 'medium' ? 250 : 150;
+                const maxShootDistance = target.size === 'large' ? 450 : 500;
+                
+                const shouldShoot = Math.random() < this.shootingAccuracy && 
+                                  distance > minSafeDistance &&  // Don't shoot if too close
+                                  distance < maxShootDistance &&
+                                  this.decisionCooldown % 5 === 0;
+                
+                if (shouldShoot) {
+                    this.keys = { ...this.keys, Space: true };
+                    if (game) {
+                        game.aiStats.shotsFired++;
+                    }
+                    // After shooting a large asteroid, prepare to evade
+                    if (target.size === 'large' && distance < 400) {
+                        this.retreatAfterShot = true;
+                    }
+                }
+            }
+            
+            // Movement logic based on target type and distance
+            if (threats.length > 0 && !this.retreatAfterShot) {
+                const isLargeTarget = target.size === 'large';
+                const minEngagementDistance = isLargeTarget ? 400 : 300;
+                
+                // Only move toward target if we're at a safe distance
+                if (distance > minEngagementDistance) {
+                    this.keys = { ...this.keys, ArrowUp: true };
+                } else if (distance < minEngagementDistance - 50) {
+                    // Too close! Back away
+                    const reverseAngle = targetAngle + Math.PI;
+                    const reverseAngleDiff = this.normalizeAngle(reverseAngle - this.angle);
+                    if (Math.abs(reverseAngleDiff) < 0.5) {
+                        this.keys = { ...this.keys, ArrowUp: true };
+                    }
+                }
+            }
+            
+            // Reset retreat flag after some distance
+            if (this.retreatAfterShot && distance > 450) {
+                this.retreatAfterShot = false;
+            }
+        }
+    }
+    
+    navigateToPowerUp(powerUp, canvas) {
+        const wrapped = this.wrappedDistance(powerUp.x, powerUp.y, canvas);
+        const distance = wrapped.distance;
+        const targetAngle = Math.atan2(wrapped.dy, wrapped.dx);
+        
+        // Use smooth rotation
+        const aligned = this.rotateToAngle(targetAngle, 0.12);
+        
+        if (distance > 50 && aligned) {
+            this.keys = { ...this.keys, ArrowUp: true };
+        }
+        
+        if (distance < 30) {
+            this.targetPowerUp = null;
+        }
+    }
+    
+    findNearestPowerUp(powerUps, canvas) {
+        let nearest = null;
+        let minDistance = Infinity;
+        
+        powerUps.forEach(powerUp => {
+            const wrapped = this.wrappedDistance(powerUp.x, powerUp.y, canvas);
+            if (wrapped.distance < minDistance) {
+                minDistance = wrapped.distance;
+                nearest = powerUp;
+            }
+        });
+        
+        return minDistance < 400 ? nearest : null;
+    }
+    
+    calculateLeadTime(target) {
+        const bulletSpeed = 15;
+        const dx = target.x - this.x;
+        const dy = target.y - this.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        const initialLeadTime = distance / bulletSpeed;
+        
+        const futureX = target.x + target.vx * initialLeadTime;
+        const futureY = target.y + target.vy * initialLeadTime;
+        const futureDistance = Math.sqrt((futureX - this.x) ** 2 + (futureY - this.y) ** 2);
+        
+        return futureDistance / bulletSpeed;
+    }
+    
+    normalizeAngle(angle) {
+        while (angle > Math.PI) angle -= 2 * Math.PI;
+        while (angle < -Math.PI) angle += 2 * Math.PI;
+        return angle;
+    }
+    
+    executeMovement(game) {
+        if (this.keys.ArrowLeft) this.rotateLeft();
+        if (this.keys.ArrowRight) this.rotateRight();
+        if (this.keys.ArrowUp) {
+            this.setThrust(true);
+        } else {
+            this.setThrust(false);
+        }
+        
+        if (this.keys.Space && game) {
+            const now = Date.now();
+            const cooldown = game.powerUpActive.rapidFire ? 50 : 200;
+            
+            if (now - game.lastShootTime > cooldown) {
+                game.lastShootTime = now;
+                
+                if (game.powerUpActive.tripleShot) {
+                    for (let i = -1; i <= 1; i++) {
+                        const bullet = this.shoot();
+                        const angle = Math.atan2(bullet.vy, bullet.vx) + (i * 0.2);
+                        const speed = Math.sqrt(bullet.vx * bullet.vx + bullet.vy * bullet.vy);
+                        bullet.vx = Math.cos(angle) * speed;
+                        bullet.vy = Math.sin(angle) * speed;
+                        game.bullets.push(bullet);
+                    }
+                } else {
+                    game.bullets.push(this.shoot());
+                }
+                
+                game.soundManager.play('shoot');
+            }
         }
     }
 }
