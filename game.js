@@ -27,6 +27,7 @@ class Game {
         this.powerUpActive = {};
         this.lastShootTime = 0;
         this.shootCooldown = 200;
+        this.bombCount = 0;  // Stack bombs for death explosion
         
         this.lastAsteroidSpawn = 0;
         this.asteroidSpawnInterval = 5000;  // Spawn more frequently
@@ -109,6 +110,7 @@ class Game {
         this.powerUpActive = {};
         
         this.ui.reset();
+        this.ui.updateBombCount(0);  // Initialize bomb counter
         this.createAsteroids(5);
         this.waveTransition.start(1);
     }
@@ -148,6 +150,7 @@ class Game {
         
         this.ui.reset();
         this.ui.setAIMode(true);
+        this.ui.updateBombCount(0);  // Initialize bomb counter
         this.createAsteroids(5);
         this.waveTransition.start(1);
     }
@@ -364,16 +367,20 @@ class Game {
         
         this.bullets = this.bullets.filter(bullet => bullet.update(this.canvas));
         
-        const timeSlowFactor = this.powerUpActive.slowTime ? 0.3 : 1;
-        
+        // SlowTime effect: stop movement initially, then permanent 5% reduction
         this.asteroids.forEach(asteroid => {
-            const originalVx = asteroid.vx;
-            const originalVy = asteroid.vy;
-            asteroid.vx *= timeSlowFactor;
-            asteroid.vy *= timeSlowFactor;
-            asteroid.update(this.canvas);
-            asteroid.vx = originalVx;
-            asteroid.vy = originalVy;
+            if (this.powerUpActive.slowTime) {
+                // Stop movement completely during slowTime
+                const storedVx = asteroid.vx;
+                const storedVy = asteroid.vy;
+                asteroid.vx = 0;
+                asteroid.vy = 0;
+                asteroid.update(this.canvas);
+                asteroid.vx = storedVx;
+                asteroid.vy = storedVy;
+            } else {
+                asteroid.update(this.canvas);
+            }
         });
         
         this.powerUps = this.powerUps.filter(powerUp => powerUp.update());
@@ -395,7 +402,7 @@ class Game {
         this.checkCollisions();
         this.checkWaveComplete();
         this.spawnBoss();
-        this.maintainAsteroidCount();
+        // Removed maintainAsteroidCount() to allow waves to complete
         
         if (this.aiMode && this.aiPlayer) {
             const secs = (Date.now() - this.aiStats.survivalTime) / 1000;
@@ -525,28 +532,35 @@ class Game {
         }
     }
     
-    activateBomb() {
-        // Clear all asteroids in a radius around the ship
-        const bombRadius = 200;
+    triggerBombExplosion(x, y, bombCount) {
+        // Explosion radius increases with bomb count
+        const bombRadius = 150 * bombCount;
         let destroyed = 0;
         
         for (let i = this.asteroids.length - 1; i >= 0; i--) {
             const asteroid = this.asteroids[i];
-            const dist = Math.hypot(this.ship.x - asteroid.x, this.ship.y - asteroid.y);
+            const dist = Math.hypot(x - asteroid.x, y - asteroid.y);
             
             if (dist < bombRadius) {
-                const fragments = asteroid.break();
-                this.asteroids.splice(i, 1);
-                this.asteroids.push(...fragments);
+                // Small asteroids are completely destroyed
+                if (asteroid.size === 'small') {
+                    this.asteroids.splice(i, 1);
+                } else {
+                    // Medium and large break into fragments
+                    const fragments = asteroid.break();
+                    this.asteroids.splice(i, 1);
+                    this.asteroids.push(...fragments);
+                }
                 this.ui.updateScore(asteroid.getPoints() * (this.powerUpActive.doublePoints ? 2 : 1));
                 this.particleSystem.createAsteroidExplosion(asteroid.x, asteroid.y, asteroid.radius);
                 destroyed++;
             }
         }
         
-        if (destroyed > 0) {
-            this.particleSystem.createExplosion(this.ship.x, this.ship.y, '#ff8800', 60);
-            this.screenShake.shake(15, 20);
+        if (destroyed > 0 || bombCount > 0) {
+            // Bigger explosion with more bombs
+            this.particleSystem.createExplosion(x, y, '#ff8800', 40 * bombCount);
+            this.screenShake.shake(10 * bombCount, 15 * bombCount);
             this.soundManager.play('explosion');
         }
     }
@@ -557,7 +571,16 @@ class Game {
         
         // Handle instant-use power-ups
         if (type === 'bomb') {
-            this.activateBomb();
+            if (this.bombCount >= 5) {
+                // At max stacks, trigger mega explosion and reset
+                this.triggerBombExplosion(this.ship.x, this.ship.y, this.bombCount);
+                this.bombCount = 0;
+                this.ui.updateBombCount(0);
+            } else {
+                // Stack the bomb
+                this.bombCount++;
+                this.ui.updateBombCount(this.bombCount);
+            }
             return;
         } else if (type === 'extraLife') {
             this.lives++;
@@ -578,6 +601,14 @@ class Game {
             this.ship.invulnerableTime = duration;
         }
         
+        // Special handling for slowTime - apply permanent 5% reduction
+        if (type === 'slowTime') {
+            this.asteroids.forEach(asteroid => {
+                asteroid.vx *= 0.95;  // Permanent 5% reduction
+                asteroid.vy *= 0.95;
+            });
+        }
+        
         this.powerUpActive[type] = setTimeout(() => {
             delete this.powerUpActive[type];
             this.ui.removePowerUp(type);
@@ -592,6 +623,13 @@ class Game {
     }
     
     shipHit() {
+        // Trigger bomb explosion on death if bombs are stacked
+        if (this.bombCount > 0) {
+            this.triggerBombExplosion(this.ship.x, this.ship.y, this.bombCount);
+            this.bombCount = 0;
+            this.ui.updateBombCount(0);
+        }
+        
         this.particleSystem.createShipExplosion(this.ship.x, this.ship.y);
         this.soundManager.play('explosion');
         this.screenShake.shake(15, 20);

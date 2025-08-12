@@ -310,7 +310,13 @@ class UI {
             shield: '🛡️',
             rapidFire: '⚡',
             tripleShot: '🔱',
-            slowTime: '⏱️'
+            slowTime: '⏱️',
+            laser: '🔦',
+            speedBoost: '🚀',
+            doublePoints: '💎',
+            autoAim: '🎯',
+            extraLife: '❤️'
+            // bomb is handled separately with counter
         };
         
         powerUpElement.innerHTML = `
@@ -350,6 +356,33 @@ class UI {
             clearTimeout(this.powerUps[type].timeout);
             this.powerUps[type].element.remove();
             delete this.powerUps[type];
+        }
+    }
+    
+    updateBombCount(count) {
+        let bombDisplay = document.getElementById('bomb-counter');
+        
+        if (!bombDisplay) {
+            // Create bomb counter if it doesn't exist
+            bombDisplay = document.createElement('div');
+            bombDisplay.id = 'bomb-counter';
+            bombDisplay.style.cssText = `
+                position: absolute;
+                bottom: 100px;
+                left: 20px;
+                font-size: 24px;
+                color: #ff8800;
+                font-family: 'Orbitron', monospace;
+                text-shadow: 0 0 10px rgba(255, 136, 0, 0.8);
+            `;
+            document.body.appendChild(bombDisplay);
+        }
+        
+        if (count > 0) {
+            bombDisplay.innerHTML = `💣 x${count}`;
+            bombDisplay.style.display = 'block';
+        } else {
+            bombDisplay.style.display = 'none';
         }
     }
     
