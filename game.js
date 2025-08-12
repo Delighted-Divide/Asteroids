@@ -140,6 +140,7 @@ class Game {
             shotsFired: 0,
             hits: 0,
             accuracy: 0,
+            decisionsCount: 0,
             decisionsPerSecond: 0,
             survivalTime: Date.now(),
             score: 0
@@ -325,8 +326,10 @@ class Game {
         this.maintainAsteroidCount();
         
         if (this.aiMode && this.aiPlayer) {
-            const timeSurvived = (Date.now() - this.aiStats.survivalTime) / 1000;
-            this.aiStats.decisionsPerSecond = this.aiPlayer.decisionsCount / timeSurvived;
+            const secs = (Date.now() - this.aiStats.survivalTime) / 1000;
+            this.aiStats.accuracy = this.aiStats.shotsFired ? (this.aiStats.hits / this.aiStats.shotsFired) : 0;
+            this.aiStats.decisionsPerSecond = this.aiPlayer ? (this.aiPlayer.decisionTicks / secs) : 0; // Think ticks/s at 60Hz ≈ 60
+            this.aiStats.actionSwitchesPerSecond = (this.aiStats.decisionsCount || 0) / secs; // State changes/s
             this.ui.updateAIStats(this.aiStats);
         }
     }
@@ -575,7 +578,22 @@ class Game {
     }
     
     gameLoop() {
-        this.update();
+        const STEP = 1000 / 60; // 60 Hz fixed timestep
+        if (!this._t0) {
+            this._t0 = performance.now();
+            this._acc = 0;
+        }
+
+        const t = performance.now();
+        this._acc += t - this._t0;
+        this._t0 = t;
+
+        // Run update in fixed quanta for consistent physics
+        while (this._acc >= STEP) {
+            this.update();
+            this._acc -= STEP;
+        }
+        
         this.render();
         requestAnimationFrame(() => this.gameLoop());
     }
