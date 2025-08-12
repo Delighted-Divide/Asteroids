@@ -198,8 +198,13 @@ class Game {
     }
     
     spawnPowerUp(x, y) {
-        if (Math.random() < 0.1) {
-            const types = ['shield', 'rapidFire', 'tripleShot', 'slowTime'];
+        if (Math.random() < 0.2) {  // Increased from 10% to 20%
+            const types = [
+                'shield', 'shield',  // Shield appears more often
+                'rapidFire', 'tripleShot', 'slowTime',
+                'laser', 'bomb', 'speedBoost', 
+                'doublePoints', 'autoAim', 'extraLife'
+            ];
             const type = types[Math.floor(Math.random() * types.length)];
             this.powerUps.push(new PowerUp(x, y, type));
         }
@@ -218,6 +223,37 @@ class Game {
             }
             
             this.boss = new Boss(x, y);
+        }
+    }
+    
+    applyAutoAim(bullet) {
+        // Find nearest asteroid
+        let nearest = null;
+        let minDist = 200; // Max auto-aim range
+        
+        for (const asteroid of this.asteroids) {
+            const dist = Math.hypot(bullet.x - asteroid.x, bullet.y - asteroid.y);
+            if (dist < minDist) {
+                minDist = dist;
+                nearest = asteroid;
+            }
+        }
+        
+        if (nearest) {
+            // Adjust bullet velocity slightly toward target
+            const dx = nearest.x - bullet.x;
+            const dy = nearest.y - bullet.y;
+            const angle = Math.atan2(dy, dx);
+            const currentAngle = Math.atan2(bullet.vy, bullet.vx);
+            const diff = angle - currentAngle;
+            
+            // Apply 20% correction toward target
+            const correction = diff * 0.2;
+            const speed = Math.sqrt(bullet.vx * bullet.vx + bullet.vy * bullet.vy);
+            const newAngle = currentAngle + correction;
+            
+            bullet.vx = Math.cos(newAngle) * speed;
+            bullet.vy = Math.sin(newAngle) * speed;
         }
     }
     
@@ -257,17 +293,42 @@ class Game {
             if (now - this.lastShootTime > cooldown) {
                 this.lastShootTime = now;
                 
-                if (this.powerUpActive.tripleShot) {
+                if (this.powerUpActive.laser) {
+                    // Create laser beam
+                    const laser = this.ship.shoot();
+                    laser.type = 'laser';
+                    laser.penetrating = true;
+                    laser.damage = 3;
+                    laser.radius = 3;
+                    laser.speed = 30;
+                    const laserSpeed = 30;
+                    laser.vx = Math.cos(this.ship.angle) * laserSpeed;
+                    laser.vy = Math.sin(this.ship.angle) * laserSpeed;
+                    this.bullets.push(laser);
+                } else if (this.powerUpActive.tripleShot) {
                     for (let i = -1; i <= 1; i++) {
                         const bullet = this.ship.shoot();
                         const angle = Math.atan2(bullet.vy, bullet.vx) + (i * 0.2);
                         const speed = Math.sqrt(bullet.vx * bullet.vx + bullet.vy * bullet.vy);
                         bullet.vx = Math.cos(angle) * speed;
                         bullet.vy = Math.sin(angle) * speed;
+                        
+                        // Add auto-aim adjustment
+                        if (this.powerUpActive.autoAim) {
+                            this.applyAutoAim(bullet);
+                        }
+                        
                         this.bullets.push(bullet);
                     }
                 } else {
-                    this.bullets.push(this.ship.shoot());
+                    const bullet = this.ship.shoot();
+                    
+                    // Add auto-aim adjustment
+                    if (this.powerUpActive.autoAim) {
+                        this.applyAutoAim(bullet);
+                    }
+                    
+                    this.bullets.push(bullet);
                 }
                 
                 this.soundManager.play('shoot');
@@ -285,7 +346,18 @@ class Game {
         }
         
         if (this.ship && this.ship.alive) {
-            this.ship.update(this.canvas);
+            // Apply speed boost if active
+            if (this.powerUpActive.speedBoost) {
+                const originalMaxSpeed = this.ship.maxSpeed;
+                const originalRotationSpeed = this.ship.rotationSpeed;
+                this.ship.maxSpeed = originalMaxSpeed * 1.5;
+                this.ship.rotationSpeed = originalRotationSpeed * 1.5;
+                this.ship.update(this.canvas);
+                this.ship.maxSpeed = originalMaxSpeed;
+                this.ship.rotationSpeed = originalRotationSpeed;
+            } else {
+                this.ship.update(this.canvas);
+            }
             this.shipTrail.addPoint(this.ship.x, this.ship.y);
         }
         this.shipTrail.update();
@@ -343,7 +415,10 @@ class Game {
                 const dist = Math.hypot(bullet.x - asteroid.x, bullet.y - asteroid.y);
                 
                 if (dist < bullet.radius + asteroid.radius) {
-                    this.bullets.splice(i, 1);
+                    // Don't remove laser bullets - they penetrate
+                    if (!bullet.penetrating) {
+                        this.bullets.splice(i, 1);
+                    }
                     
                     if (this.aiMode) {
                         this.aiStats.hits++;
@@ -353,13 +428,18 @@ class Game {
                     this.asteroids.splice(j, 1);
                     this.asteroids.push(...fragments);
                     
-                    this.ui.updateScore(asteroid.getPoints());
+                    // Apply double points if active
+                    const points = asteroid.getPoints() * (this.powerUpActive.doublePoints ? 2 : 1);
+                    this.ui.updateScore(points);
                     this.particleSystem.createAsteroidExplosion(asteroid.x, asteroid.y, asteroid.radius);
                     this.soundManager.play('explosion');
                     this.screenShake.shake(5, 10);
                     
                     this.spawnPowerUp(asteroid.x, asteroid.y);
-                    break;
+                    
+                    if (!bullet.penetrating) {
+                        break;
+                    }
                 }
             }
             
@@ -394,8 +474,7 @@ class Game {
                     if (!this.powerUpActive.shield) {
                         this.shipHit();
                     } else {
-                        this.ui.removePowerUp('shield');
-                        delete this.powerUpActive.shield;
+                        // Shield now provides invulnerability, just show effect
                         this.particleSystem.createExplosion(this.ship.x, this.ship.y, '#00ff00', 15);
                     }
                     break;
@@ -408,8 +487,8 @@ class Game {
                     if (!this.powerUpActive.shield) {
                         this.shipHit();
                     } else {
-                        this.ui.removePowerUp('shield');
-                        delete this.powerUpActive.shield;
+                        // Shield provides invulnerability
+                        this.particleSystem.createExplosion(this.ship.x, this.ship.y, '#00ff00', 15);
                     }
                 }
             }
@@ -423,8 +502,8 @@ class Game {
                         if (!this.powerUpActive.shield) {
                             this.shipHit();
                         } else {
-                            this.ui.removePowerUp('shield');
-                            delete this.powerUpActive.shield;
+                            // Shield provides invulnerability
+                            this.particleSystem.createExplosion(bullet.x, bullet.y, '#00ff00', 10);
                         }
                     }
                 }
@@ -446,17 +525,67 @@ class Game {
         }
     }
     
+    activateBomb() {
+        // Clear all asteroids in a radius around the ship
+        const bombRadius = 200;
+        let destroyed = 0;
+        
+        for (let i = this.asteroids.length - 1; i >= 0; i--) {
+            const asteroid = this.asteroids[i];
+            const dist = Math.hypot(this.ship.x - asteroid.x, this.ship.y - asteroid.y);
+            
+            if (dist < bombRadius) {
+                const fragments = asteroid.break();
+                this.asteroids.splice(i, 1);
+                this.asteroids.push(...fragments);
+                this.ui.updateScore(asteroid.getPoints() * (this.powerUpActive.doublePoints ? 2 : 1));
+                this.particleSystem.createAsteroidExplosion(asteroid.x, asteroid.y, asteroid.radius);
+                destroyed++;
+            }
+        }
+        
+        if (destroyed > 0) {
+            this.particleSystem.createExplosion(this.ship.x, this.ship.y, '#ff8800', 60);
+            this.screenShake.shake(15, 20);
+            this.soundManager.play('explosion');
+        }
+    }
+    
     activatePowerUp(powerUp) {
         const type = powerUp.type;
         const duration = powerUp.types[type].duration;
         
+        // Handle instant-use power-ups
+        if (type === 'bomb') {
+            this.activateBomb();
+            return;
+        } else if (type === 'extraLife') {
+            this.lives++;
+            this.ui.updateLives(this.lives);
+            this.soundManager.play('powerup');
+            return;
+        }
+        
+        // Handle duration-based power-ups
         if (this.powerUpActive[type]) {
             clearTimeout(this.powerUpActive[type]);
+        }
+        
+        // Special handling for shield - add invulnerability
+        if (type === 'shield') {
+            this.ship.invulnerable = true;
+            this.ship.invulnerableStart = Date.now();
+            this.ship.invulnerableTime = duration;
         }
         
         this.powerUpActive[type] = setTimeout(() => {
             delete this.powerUpActive[type];
             this.ui.removePowerUp(type);
+            
+            // Remove invulnerability when shield expires
+            if (type === 'shield') {
+                this.ship.invulnerable = false;
+            }
         }, duration);
         
         this.ui.addPowerUp(type, duration);
@@ -487,6 +616,11 @@ class Game {
     }
     
     maintainAsteroidCount() {
+        // Don't spawn new asteroids if we're close to completing a wave
+        if (this.asteroids.length <= 2) {
+            return; // Allow wave to complete
+        }
+        
         const now = Date.now();
         const largeAsteroids = this.asteroids.filter(a => a.size === 'large').length;
         

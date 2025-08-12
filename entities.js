@@ -1191,10 +1191,16 @@ class PowerUp {
         this.rotation = 0;
         
         this.types = {
-            shield: { icon: '🛡️', color: '#00ff00', duration: 5000 },
+            shield: { icon: '🛡️', color: '#00ff00', duration: 10000 },  // Doubled duration
             rapidFire: { icon: '⚡', color: '#ffff00', duration: 5000 },
             tripleShot: { icon: '🔱', color: '#ff00ff', duration: 5000 },
-            slowTime: { icon: '⏱️', color: '#00ffff', duration: 3000 }
+            slowTime: { icon: '⏱️', color: '#00ffff', duration: 3000 },
+            laser: { icon: '🔦', color: '#ff0000', duration: 4000 },
+            bomb: { icon: '💣', color: '#ff8800', duration: 0 },  // Instant use
+            speedBoost: { icon: '🚀', color: '#00ffff', duration: 6000 },
+            doublePoints: { icon: '💎', color: '#ffff00', duration: 8000 },
+            autoAim: { icon: '🎯', color: '#ff00ff', duration: 7000 },
+            extraLife: { icon: '❤️', color: '#ff0000', duration: 0 }  // Instant use
         };
     }
     
