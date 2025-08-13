@@ -28,6 +28,7 @@ class Game {
         this.lastShootTime = 0;
         this.shootCooldown = 200;
         this.bombCount = 0;  // Stack bombs for death explosion
+        this.powerUpUpgrades = {};  // Track upgrades from boss kills
         
         this.lastAsteroidSpawn = 0;
         this.asteroidSpawnInterval = 5000;  // Spawn more frequently
@@ -290,7 +291,7 @@ class Game {
         }
         
         if (this.keys['Space']) {
-            const now = Date.now();
+            const now = performance.now();
             const cooldown = this.powerUpActive.rapidFire ? 50 : this.shootCooldown;
             
             if (now - this.lastShootTime > cooldown) {
@@ -469,6 +470,9 @@ class Game {
                         this.soundManager.play('explosion');
                         this.screenShake.shake(20, 30);
                         this.boss = null;
+                        
+                        // Boss kill upgrades all power-ups
+                        this.upgradePowerUps();
                     }
                 }
             }
@@ -533,8 +537,9 @@ class Game {
     }
     
     triggerBombExplosion(x, y, bombCount) {
-        // Explosion radius increases with bomb count
-        const bombRadius = 150 * bombCount;
+        // Explosion radius increases with bomb count and upgrades
+        const bombUpgrade = this.powerUpUpgrades.bomb || 1;
+        const bombRadius = 150 * bombCount * bombUpgrade;
         let destroyed = 0;
         
         for (let i = this.asteroids.length - 1; i >= 0; i--) {
@@ -565,9 +570,39 @@ class Game {
         }
     }
     
+    upgradePowerUps() {
+        // Upgrade all power-up types after boss kill
+        const types = ['shield', 'rapidFire', 'tripleShot', 'slowTime', 'laser', 
+                      'speedBoost', 'doublePoints', 'autoAim', 'bomb'];
+        
+        for (const type of types) {
+            if (!this.powerUpUpgrades[type]) {
+                this.powerUpUpgrades[type] = 1;
+            }
+            
+            if (type === 'bomb') {
+                // Bomb gets damage upgrade instead of duration
+                this.powerUpUpgrades[type] *= 1.2; // 20% damage increase
+            } else {
+                // Other power-ups get 10% duration increase
+                this.powerUpUpgrades[type] *= 1.1;
+            }
+        }
+        
+        // Visual feedback
+        this.particleSystem.createExplosion(this.ship.x, this.ship.y, '#ffff00', 30);
+        console.log('Power-ups upgraded!', this.powerUpUpgrades);
+    }
+    
     activatePowerUp(powerUp) {
         const type = powerUp.type;
-        const duration = powerUp.types[type].duration;
+        let duration = powerUp.types[type].duration;
+        
+        // Apply upgrades from boss kills
+        const upgrade = this.powerUpUpgrades[type] || 1;
+        if (type !== 'bomb') {
+            duration *= upgrade;  // Apply duration upgrade
+        }
         
         // Handle instant-use power-ups
         if (type === 'bomb') {
@@ -589,27 +624,24 @@ class Game {
             return;
         }
         
-        // Handle duration-based power-ups
+        // Handle duration-based power-ups (stackable)
         if (this.powerUpActive[type]) {
-            clearTimeout(this.powerUpActive[type]);
+            // Stack duration by adding to existing
+            clearTimeout(this.powerUpActive[type].timeout);
+            const existingDuration = this.powerUpActive[type].endTime - performance.now();
+            duration = Math.max(0, existingDuration) + duration; // Add to remaining time
         }
         
         // Special handling for shield - add invulnerability
         if (type === 'shield') {
             this.ship.invulnerable = true;
-            this.ship.invulnerableStart = Date.now();
+            this.ship.invulnerableStart = performance.now();
             this.ship.invulnerableTime = duration;
         }
         
-        // Special handling for slowTime - apply permanent 5% reduction
-        if (type === 'slowTime') {
-            this.asteroids.forEach(asteroid => {
-                asteroid.vx *= 0.95;  // Permanent 5% reduction
-                asteroid.vy *= 0.95;
-            });
-        }
+        // SlowTime now only stops during active period, no permanent reduction
         
-        this.powerUpActive[type] = setTimeout(() => {
+        const timeoutId = setTimeout(() => {
             delete this.powerUpActive[type];
             this.ui.removePowerUp(type);
             
@@ -618,6 +650,11 @@ class Game {
                 this.ship.invulnerable = false;
             }
         }, duration);
+        
+        this.powerUpActive[type] = {
+            timeout: timeoutId,
+            endTime: performance.now() + duration
+        };
         
         this.ui.addPowerUp(type, duration);
     }
@@ -699,13 +736,30 @@ class Game {
             this.asteroidSpeed += 0.1;
             this.bossSpawnChance += 0.001;
             
+            // Wave completion rewards
+            if (this.ship && this.ship.alive) {
+                // Collect all existing power-ups on map
+                for (const powerUp of this.powerUps) {
+                    this.activatePowerUp(powerUp);
+                    this.particleSystem.createPowerUpCollect(powerUp.x, powerUp.y, powerUp.types[powerUp.type].color);
+                }
+                this.powerUps = [];
+                
+                // Grant 2 of a random power-up
+                const rewardTypes = ['shield', 'rapidFire', 'tripleShot', 'laser', 'speedBoost', 'doublePoints', 'autoAim'];
+                const rewardType = rewardTypes[Math.floor(Math.random() * rewardTypes.length)];
+                
+                // Create temporary power-up object for activation
+                const tempPowerUp = { type: rewardType, types: new PowerUp(0, 0, rewardType).types };
+                this.activatePowerUp(tempPowerUp);
+                this.activatePowerUp(tempPowerUp); // Stack it twice
+                
+                this.ui.updateScore(100 * this.wave);
+            }
+            
             this.createAsteroids(Math.min(5 + this.wave, 15));  // More asteroids per wave
             this.waveTransition.start(this.wave);
             this.soundManager.play('waveComplete');
-            
-            if (this.ship && this.ship.alive) {
-                this.ui.updateScore(100 * this.wave);
-            }
         }
     }
     

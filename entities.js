@@ -13,7 +13,7 @@ class Ship {
         this.type = type;
         this.invulnerable = true;
         this.invulnerableTime = 3000;
-        this.invulnerableStart = Date.now();
+        this.invulnerableStart = performance.now();
         this.thrusting = false;
         this.alive = true;
         
@@ -97,7 +97,7 @@ class Ship {
         if (this.y < 0) this.y = canvas.height;
         if (this.y > canvas.height) this.y = 0;
         
-        if (this.invulnerable && Date.now() - this.invulnerableStart > this.invulnerableTime) {
+        if (this.invulnerable && performance.now() - this.invulnerableStart > this.invulnerableTime) {
             this.invulnerable = false;
         }
     }
@@ -108,7 +108,7 @@ class Ship {
         ctx.rotate(this.angle);
         
         if (this.invulnerable) {
-            ctx.globalAlpha = Math.sin(Date.now() * 0.01) * 0.5 + 0.5;
+            ctx.globalAlpha = Math.sin(performance.now() * 0.01) * 0.5 + 0.5;
         }
         
         const design = this.shipDesigns[this.type];
@@ -483,6 +483,104 @@ class AIPlayer extends Ship {
         this.currentAction = null;  // Current action being executed
         this.actionUtilities = {};  // Utility scores for actions
         this.aiNextFireAt = 0;  // AI's next allowed fire time (monotonic)
+        
+        // MPC Planner
+        this.useMPC = true; // Toggle between MPC and legacy AI
+        this.mpcPlanner = typeof MPCPlanner !== 'undefined' ? new MPCPlanner() : null;
+        this.currentPlan = null;
+        this.planIndex = 0;
+        this.replanInterval = 2; // Replan every N frames for performance
+        this.framesSinceReplan = 0;
+        this.mpcEnabled = true; // Can be toggled for debugging
+        
+        // Web Worker for MPC (off-thread planning)
+        this.mpcWorker = null;
+        this.lastPlanId = 0;
+        this.pendingPlanId = 0;
+        this.useWorker = true; // Use worker by default if available
+        this.plannedActions = []; // Buffer of planned actions
+        this.initMPCWorker();
+    }
+    
+    // Initialize MPC Web Worker
+    initMPCWorker() {
+        if (typeof Worker === 'undefined') {
+            console.log('Web Workers not supported, using synchronous MPC');
+            this.useWorker = false;
+            return;
+        }
+        
+        try {
+            this.mpcWorker = new Worker('mpc.worker.js');
+            
+            // Handle messages from worker
+            this.mpcWorker.onmessage = (e) => {
+                const { id, type, bestAction, score, elapsed } = e.data;
+                
+                if (type === 'worker_ready') {
+                    console.log('MPC Worker ready');
+                    // Initialize with config
+                    this.mpcWorker.postMessage({
+                        id: ++this.lastPlanId,
+                        type: 'init',
+                        config: {
+                            horizon: 45,
+                            numSequences: 100,
+                            generations: 3
+                        }
+                    });
+                } else if (type === 'result' && id === this.pendingPlanId) {
+                    // Only use result if it's for the latest request
+                    if (bestAction) {
+                        // Clear buffer and add new action
+                        this.plannedActions = [bestAction];
+                        if (elapsed > 10) {
+                            console.log(`MPC plan took ${elapsed.toFixed(1)}ms, score: ${score.toFixed(0)}`);
+                        }
+                    }
+                } else if (type === 'error') {
+                    console.error('MPC Worker error:', e.data.error);
+                }
+            };
+            
+            this.mpcWorker.onerror = (error) => {
+                console.error('MPC Worker error:', error);
+                this.useWorker = false;
+            };
+            
+        } catch (error) {
+            console.error('Failed to create MPC Worker:', error);
+            this.useWorker = false;
+        }
+    }
+    
+    // Request a plan from the worker
+    requestMPCPlan(game, canvas) {
+        if (!this.mpcWorker || !this.useWorker) {
+            return false;
+        }
+        
+        try {
+            // Create serializable game state
+            const state = GameState.fromGame(game, canvas);
+            const plainState = state.toPlainObject();
+            
+            // Increment plan ID to track latest request
+            this.pendingPlanId = ++this.lastPlanId;
+            
+            // Send planning request to worker
+            this.mpcWorker.postMessage({
+                id: this.pendingPlanId,
+                type: 'plan',
+                state: plainState,
+                timeBudget: 4 // 4ms budget
+            });
+            
+            return true;
+        } catch (error) {
+            console.error('Failed to request MPC plan:', error);
+            return false;
+        }
     }
     
     // Calculate wrapped distance considering screen edges
@@ -515,12 +613,12 @@ class AIPlayer extends Ship {
         const rvy = tvy - this.vy; // relative velocity
         const rv2 = rvx * rvx + rvy * rvy;
         
-        // Time to closest point of approach (in seconds at 60 Hz step)
+        // tCPA measured in FRAMES (velocities are per-frame)
         const tCPA = rv2 > 0 ? Math.max(0, -(dx * rvx + dy * rvy) / rv2) : 0;
         
-        // Position at CPA (converting frames to pixels)
-        const cx = dx + rvx * (tCPA * 60);
-        const cy = dy + rvy * (tCPA * 60);
+        // Position at CPA
+        const cx = dx + rvx * tCPA;
+        const cy = dy + rvy * tCPA;
         const dCPA2 = cx * cx + cy * cy; // Squared distance at CPA
         
         return { tCPA, dCPA2, angle: Math.atan2(dy, dx) };
@@ -531,45 +629,228 @@ class AIPlayer extends Ship {
         return Math.sqrt(this.vx * this.vx + this.vy * this.vy);
     }
     
-    // Compute aim plan independent of movement action
-    computeAimPlan(game, canvas) {
-        // 1) Choose target: small > medium > large, then nearest
-        const rocks = game.asteroids.slice().sort((a, b) => {
-            const rk = s => s === 'small' ? 0 : s === 'medium' ? 1 : 2;
-            const ra = rk(a.size), rb = rk(b.size);
-            const da = this.wrappedDistance(a.x, a.y, canvas).distance;
-            const db = this.wrappedDistance(b.x, b.y, canvas).distance;
-            return (ra - rb) || (da - db);
-        });
-        const target = rocks[0] || game.boss;
-        if (!target) return null;
+    // Hybrid movement: blend evade, seek, and pursue intents
+    desiredVelocityHybrid(game, canvas, plan, immediateThreats) {
+        const v = {x: 0, y: 0};
         
-        // 2) Exact first-order intercept
-        const s = 15; // bullet speed
-        const sol = this.solveInterceptWrapped(target, s, canvas);
-        let aimAngle, tFrames = Infinity;
-        if (sol) {
-            aimAngle = sol.aimAngle;
-            tFrames = sol.t;
-        } else {
-            // No real root → direct aim fallback only when very close
-            const w = this.wrappedDistance(target.x, target.y, canvas);
-            if (w.distance > 140) return null;
-            aimAngle = Math.atan2(w.dy, w.dx);
+        // (1) Evade (highest priority): push away from predicted near collisions
+        for (const t of immediateThreats) {
+            const w = this.wrappedDistance(t.entity.x + t.entity.vx*20, t.entity.y + t.entity.vy*20, canvas);
+            const d2 = Math.max(64, w.dx*w.dx + w.dy*w.dy);
+            v.x += (-w.dx) * (9000/d2);
+            v.y += (-w.dy) * (9000/d2);
         }
         
-        // 3) Distance gates (smalls allowed close)
-        const dist = this.wrappedDistance(target.x, target.y, canvas).distance;
-        const minSafe = target.size === 'large' ? 280 : target.size === 'medium' ? 120 : 0; // Let smalls be point-blank
+        // (2) Seek: either nearest valuable power-up or a "better position"
+        const pu = this.findBestPowerUp(game.powerUps, canvas, game, immediateThreats);
+        if (pu) {
+            const ar = this.arriveController(pu.x, pu.y, canvas);
+            // write desired to instance so executeMovement can honor it
+            this._desiredSpeed = ar.desiredSpeed;
+            this._brakeNow = ar.brakeNow;
+            v.x += Math.cos(ar.heading) * 240;
+            v.y += Math.sin(ar.heading) * 240;
+        } else if (plan) {
+            // arrive near a tactical ring around target (minSafe + 60)
+            const tgt = plan.target;
+            const w   = this.wrappedDistance(tgt.x, tgt.y, canvas);
+            const r   = Math.max(1, w.distance);
+            const aimR = Math.max(200, Math.min(320, r - 240));
+            const ux = w.dx / r, uy = w.dy / r;
+            const tx = this.x + ux * aimR, ty = this.y + uy * aimR;
+            const ar = this.arriveController(tx, ty, canvas);
+            this._desiredSpeed = ar.desiredSpeed;
+            this._brakeNow = this._brakeNow || ar.brakeNow;
+            v.x += Math.cos(ar.heading) * 220;
+            v.y += Math.sin(ar.heading) * 220;
+        }
+        
+        // (3) Pursue/Strafe vs Boss: maintain a ring and add tangential velocity
+        if (game.boss) {
+            const w = this.wrappedDistance(game.boss.x, game.boss.y, canvas);
+            const dist = Math.hypot(w.dx, w.dy);
+            const A = this.aggression();
+            const ring = (game.powerUpActive.shield ? 280 : 360) / A;   // closer with shield
+            const radialErr = dist - ring;
+            // radial correction
+            v.x += (w.dx / Math.max(1, dist)) * (radialErr * 0.6);
+            v.y += (w.dy / Math.max(1, dist)) * (radialErr * 0.6);
+            // tangential strafe (perpendicular)
+            v.x += (-w.dy / Math.max(1, dist)) * 120;
+            v.y += (w.dx / Math.max(1, dist)) * 120;
+        }
+        
+        // clamp & return as a heading
+        const mag = Math.hypot(v.x, v.y) || 1;
+        return { heading: Math.atan2(v.y, v.x), strength: Math.min(1, mag/300) };
+    }
+    
+    // Calculate shot quality based on multiple factors
+    hitQuality(tFrames, alignErr, hasClear, angVel) {
+        // quality decays with time-to-hit and angular slewing
+        const qT = Math.exp(-tFrames / 36);           // half-life ~25 frames
+        const qA = Math.exp(-((alignErr / (0.10 + 0.35*angVel))**2));
+        const qV = hasClear ? 1 : 0;                  // block if occluded
+        return qT * qA * qV;                           // 0..1
+    }
+    
+    // Dynamic engagement window based on buffs and target
+    engagementWindow(target, dist, buffs, bossPresent) {
+        const baseMax = bossPresent ? 650 : 520;       // tighten global max range
+        let maxRange = baseMax;
+        if (buffs.tripleShot || buffs.rapidFire) maxRange += 100;   // allow a bit longer when buffed
+        if (target === window.game?.boss) maxRange += 200;          // boss gets longer leash
+        
+        // smalls can be shot closer; large need standoff unless buffed
+        const minSafe = (target === window.game?.boss ? 260 :
+                        target.size === 'large' ? 260 :
+                        target.size === 'medium' ? 120 : 40) / (buffs.shield ? 1.4 : 1);
+        
+        return { minSafe, maxRange };
+    }
+    
+    // Check if line of fire is clear (no obstacles)
+    hasClearLine(target, aimAngle, dist, game, canvas) {
+        const ux = Math.cos(aimAngle), uy = Math.sin(aimAngle);
+        const corridor = (target.radius || 12) + 6; // thin tube
+        
+        for (const a of game.asteroids) {
+            if (a === target) continue;
+            const w = this.wrappedDistance(a.x, a.y, canvas);
+            const proj = w.dx*ux + w.dy*uy;          // along-ray distance
+            if (proj <= 0 || proj >= dist) continue; // not between muzzle & target
+            const perp = Math.abs(w.dx*uy - w.dy*ux); // perpendicular distance
+            if (perp < a.radius + corridor) return false;
+        }
+        return true;
+    }
+    
+    // First-order intercept against all 9 torus images; returns best {t, aimAngle} in FRAMES
+    solveInterceptToroidal(target, bulletSpeed, canvas) {
+        const w = canvas.width, h = canvas.height;
+        const wvx = target.vx - this.vx, wvy = target.vy - this.vy;
+        
+        let best = null;
+        for (const ox of [0, -w, +w]) {
+            for (const oy of [0, -h, +h]) {
+                const rx = (target.x + ox) - this.x;
+                const ry = (target.y + oy) - this.y;
+                
+                const a = (wvx*wvx + wvy*wvy) - bulletSpeed*bulletSpeed;
+                const b = 2*(rx*wvx + ry*wvy);
+                const c = rx*rx + ry*ry;
+                
+                let t = Infinity;
+                if (Math.abs(a) < 1e-6) {
+                    if (Math.abs(b) > 1e-6) t = -c/b;
+                } else {
+                    const disc = b*b - 4*a*c;
+                    if (disc >= 0) {
+                        const s = Math.sqrt(disc);
+                        const t1 = (-b - s)/(2*a), t2 = (-b + s)/(2*a);
+                        if (t1 > 0 && t2 > 0) t = Math.min(t1, t2);
+                        else if (t1 > 0) t = t1;
+                        else if (t2 > 0) t = t2;
+                    }
+                }
+                
+                if (t > 0 && isFinite(t)) {
+                    // aim direction n = (r + w*t) / (s*t)
+                    const nx = (rx + wvx*t) / (bulletSpeed*t);
+                    const ny = (ry + wvy*t) / (bulletSpeed*t);
+                    const aimAngle = Math.atan2(ny, nx);
+                    if (!best || t < best.t) best = { t, aimAngle };
+                }
+            }
+        }
+        return best;
+    }
+    
+    // Calculate aggression multiplier based on active power-ups
+    aggression() {
+        let m = 1;
+        const game = window.game; // Access game instance
+        if (game && game.powerUpActive) {
+            if (game.powerUpActive.shield) m += 0.4;      // take more risks
+            if (game.powerUpActive.rapidFire) m += 0.2;    // looser angle is fine
+            if (game.powerUpActive.tripleShot) m += 0.2;   // spread compensates
+        }
+        return m;
+    }
+    
+    // Compute aim plan independent of movement action
+    computeAimPlan(game, canvas) {
+        // Build candidates: all rocks + boss (if present)
+        const candidates = game.boss ? [...game.asteroids, game.boss] : [...game.asteroids];
+        
+        let target = null, bestScore = -Infinity, targetIsBoss = false, distToTarget = Infinity;
+        
+        const A = this.aggression();
+        const bulletSpeed = 15; // bullet speed for intercept calculation
+        for (const obj of candidates) {
+            const isBoss = obj === game.boss;
+            const w = this.wrappedDistance(obj.x, obj.y, canvas);
+            const dist = w.distance;
+            
+            // Calculate intercept for time-to-hit scoring
+            const sol = this.solveInterceptToroidal(obj, bulletSpeed, canvas);
+            
+            // Size/boss weighting: prefer smalls, but boss gets a big boost
+            const sizeWeight = isBoss ? 2.2 + 0.3*(A-1) :
+                               (obj.size === 'small' ? 1.0 : obj.size === 'medium' ? 0.6 : 0.3);
+            
+            // Time-to-hit bias: sooner hit => higher score
+            const hitBias = sol ? Math.max(0, 1.2 - (sol.t/40)) : 0;
+            
+            // Distance bias: closer is better
+            const nearBias = 1.0 / Math.max(80, dist);
+            
+            // Blend together with boss bonus
+            const score = sizeWeight + 2.0*nearBias + 1.2*hitBias + (isBoss ? 0.8 : 0);
+            
+            if (score > bestScore) {
+                bestScore = score;
+                target = obj;
+                targetIsBoss = isBoss;
+                distToTarget = dist;
+            }
+        }
+        
+        if (!target) return null;
+        
+        // 2) Solve intercept on a torus
+        const s = 15; // bullet px/frame
+        const sol = this.solveInterceptToroidal(target, s, canvas);
+        
+        let aimAngle, tFrames;
+        if (sol) {
+            aimAngle = sol.aimAngle;
+            tFrames = sol.t;                 // carry this forward
+        } else {
+            // fallback: direct line aim (keeps movement/rotation purposeful)
+            const w = this.wrappedDistance(target.x, target.y, canvas);
+            aimAngle = Math.atan2(w.dy, w.dx);
+            tFrames = 999;                   // mark as "long / low-quality"
+        }
+        
+        // 3) Distance gates (with power-up aggression)
+        const A2 = this.aggression();
+        const minSafe = (targetIsBoss ? 260 : (target.size === 'large' ? 280 : target.size === 'medium' ? 120 : 0)) / A2;
         const onlyLarge = game.asteroids.length > 0 && game.asteroids.every(a => a.size === 'large');
-        const maxRange = onlyLarge ? 900 : 700;
+        const maxRange = targetIsBoss ? 1000 : (onlyLarge ? 900 : 700);
+        
+        // Account for time to rotate so we don't take impossible long shots
+        const maxTurnPerFrame = this.rotationSpeed * 3.2;
+        const alignFrames = Math.ceil(Math.abs(this.normalizeAngle(aimAngle - this.angle)) / Math.max(1e-6, maxTurnPerFrame));
+        const okLifetime = tFrames <= (60 - alignFrames); // bullets live 60 frames
         
         return {
             target,
             aimAngle,
-            dist,
-            okLifetime: (tFrames <= 60) || !sol,
-            inRange: dist > minSafe && dist < maxRange
+            tFrames,                         // NEW - always include tFrames
+            dist: distToTarget,
+            okLifetime,
+            inRange: distToTarget > minSafe && distToTarget < maxRange
         };
     }
     
@@ -707,15 +988,26 @@ class AIPlayer extends Ship {
         // Reset keys at the START, not at the end
         this.keys = {};
         
+        // Use MPC if available and enabled
+        if (this.useMPC && this.mpcPlanner && this.mpcEnabled) {
+            try {
+                this.makeDecisionsMPC(game, canvas);
+                return;
+            } catch (error) {
+                console.error('MPC error, falling back to legacy AI:', error);
+                this.mpcEnabled = false; // Disable MPC if it errors
+            }
+        }
+        
         // Compute aim plan first (independent of movement)
         const plan = this.computeAimPlan(game, canvas);
         
         const threats = this.assessThreats(asteroids, boss, game.bullets, canvas);
         // Check for emergency threats (very close)
         const emergencyThreats = threats.filter(t => t.distance < this.emergencyThreshold + (t.radius || 0));
-        // Check for immediate threats (approaching soon) - now using time in seconds
+        // Check for immediate threats (approaching soon) - using frames
         const immediateThreats = threats.filter(t => 
-            (t.timeToCollision < 1.5 && t.distance < this.dangerThreshold) || // 1.5 seconds
+            (t.timeToCollision < 90 && t.distance < this.dangerThreshold) || // 90 frames (~1.5 seconds at 60fps)
             t.distance < this.emergencyThreshold + (t.radius || 0)
         );
         
@@ -729,15 +1021,31 @@ class AIPlayer extends Ship {
         };
         
         // Add bullet threat weight
-        const bulletThreats = threats.filter(t => t.type === 'bullet' && t.timeToCollision < 1);
+        const bulletThreats = threats.filter(t => t.type === 'bullet' && t.timeToCollision < 60); // 60 frames = 1 second
         this.actionUtilities.evade += bulletThreats.length * 0.7;
         
         // Find best power-up and adjust utilities
-        const candidatePU = this.findBestPowerUp(powerUps, canvas, game);
+        const candidatePU = this.findBestPowerUp(powerUps, canvas, game, immediateThreats);
         if (candidatePU) {
             this.targetPowerUp = candidatePU;
-            // Make power-up collection competitive with hunting when safe
-            this.actionUtilities.collectPowerup = Math.max(0.5, this.actionUtilities.hunt - 0.05);
+            // Make nearby power-ups win when safe
+            const nearPU = this.wrappedDistance(candidatePU.x, candidatePU.y, canvas).distance < 350;
+            const safe = immediateThreats.length === 0;
+            
+            if (nearPU && safe) {
+                this.actionUtilities.collectPowerup = Math.max(this.actionUtilities.hunt, 0.8);
+            } else {
+                // Make power-up collection competitive with hunting when safe
+                const safety = 1 / (1 + immediateThreats.length);
+                this.actionUtilities.collectPowerup = Math.max(
+                    0.6, this.actionUtilities.hunt * (safety > 0.5 ? 1.1 : 0.7)
+                );
+            }
+        }
+        
+        // Boss bias: when a boss exists and we're not in danger, boost hunt
+        if (game.boss && this.actionUtilities.evade < 0.3) {
+            this.actionUtilities.hunt += 0.25; // make hunting (boss) win ties
         }
         
         // Find the action with highest utility
@@ -759,7 +1067,9 @@ class AIPlayer extends Ship {
             });
         }
         
-        // Execute the best action (only one at a time for clarity)
+        // Old single-action system replaced by hybrid movement
+        // Action selection is still used for debugging/metrics but not movement
+        /* Deprecated - using hybrid movement instead
         switch(this.currentAction) {
             case 'evade':
                 this.emergencyEvade(emergencyThreats.length > 0 ? emergencyThreats : bulletThreats);
@@ -768,52 +1078,158 @@ class AIPlayer extends Ship {
                 this.avoidThreats(immediateThreats);
                 break;
             case 'hunt':
-                // Always hunt, even during danger
                 this.huntTargets(threats, boss, game, canvas);
                 break;
             case 'collectPowerup':
-                // targetPowerUp already set in utility calculation
                 if (this.targetPowerUp) {
                     this.navigateToPowerUp(this.targetPowerUp, canvas);
                 }
                 break;
             case 'patrol':
-                // Just drift for now
                 break;
         }
+        */
         
         if (this.decisionCooldown <= 0) {
             this.decisionCooldown = this.reactionTime;
         }
         this.decisionCooldown--;
         
-        // After movement action, always try to steer toward aim
+        // Use hybrid movement system instead of single-action movement
+        const steer = this.desiredVelocityHybrid(game, canvas, plan, immediateThreats);
+        this.rotateToAnglePD(steer.heading, { kp: 0.55, kd: 0.18, maxTurn: this.rotationSpeed * 3.0 });
+        
+        if (steer.strength > 0.15) {
+            this.keys = { ...this.keys, ArrowUp: true };
+        }
+        
+        // Retro-thrust braking when needed
+        if (this._brakeNow) {
+            const retro = this.velocityAngle() + Math.PI;
+            this.rotateToAnglePD(retro, { kp: 0.6, kd: 0.2, maxTurn: this.rotationSpeed * 3.2 });
+            this.keys = { ...this.keys, ArrowUp: true };
+        }
+        
+        // After movement, still try to aim at target if we have one
         if (plan) {
-            // PD steer toward the aim while avoiding/moving
-            // Keeps the nose near target so alignment happens often
+            // Secondary rotation toward aim (lower priority than movement)
             this.rotateToAnglePD(plan.aimAngle, { 
-                kp: 0.6, 
-                kd: 0.2, 
-                maxTurn: this.rotationSpeed * 3.2 
+                kp: 0.3, 
+                kd: 0.1, 
+                maxTurn: this.rotationSpeed * 2.0 
             });
         }
         
-        // Try to fire every frame (no latches)
-        if (plan && plan.okLifetime && plan.inRange) {
-            const err = Math.abs(this.normalizeAngle(plan.aimAngle - this.angle));
-            // Loosen requirements during threats
-            const underThreat = this.actionUtilities.evade > 0.3;
-            const angleOK = underThreat ? err < 0.45 :  // Very loose during evasion
-                (plan.target.size === 'small' ? err < 0.10 :   // Tighter for smalls
-                 plan.target.size === 'medium' ? err < 0.16 :
-                 err < 0.30);  // Large can be looser
+        // Updated fire gate with quality scoring
+        if (plan) {
+            const buffs = game.powerUpActive;
+            const { minSafe, maxRange } = this.engagementWindow(plan.target, plan.dist, buffs, !!game.boss);
+            const inRange = plan.dist > minSafe && plan.dist < maxRange;
             
-            if (angleOK) {
+            const err = Math.abs(this.normalizeAngle(plan.aimAngle - this.angle));
+            const angVel = Math.abs(this.normalizeAngle(this.angle - (this._prevAngle ?? this.angle)));
+            const near = plan.dist < 260;
+            
+            // Relax LOS for near shots (so we don't stall behind small debris)
+            const losOK = near ? true : this.hasClearLine(plan.target, plan.aimAngle, plan.dist, game, canvas);
+            
+            // Proper quality score uses tFrames (not a boolean!)
+            const q = this.hitQuality(plan.tFrames, err, losOK, angVel);
+            
+            // Be stricter only for very long shots
+            const needQ = (plan.dist > 420 ? 0.65 : 0.35) - ((buffs.tripleShot || buffs.rapidFire) ? 0.10 : 0);
+            
+            // Check if power-up is near and safe - if so, skip far shots
+            const puNearAndSafe = this.targetPowerUp && 
+                this.wrappedDistance(this.targetPowerUp.x, this.targetPowerUp.y, canvas).distance < 350 && 
+                immediateThreats.length === 0;
+            if (puNearAndSafe && plan.dist > 420) {
+                // Skip far shots when we should be collecting power-ups
+                return;
+            }
+            
+            // Two ways to fire: (A) near & aligned, or (B) passes quality test
+            const nearAligned = near && err < 0.22;  // ~12.6°
+            if (inRange && (nearAligned || (plan.okLifetime && q >= needQ))) {
                 this.keys = { ...this.keys, Space: true };
             }
         }
         
+        // Store angle for next frame
+        this._prevAngle = this.angle;
+        
         // Now execute movement with the keys that were set
+        this.executeMovement(game);
+    }
+    
+    // MPC-based decision making
+    makeDecisionsMPC(game, canvas) {
+        // Try to use Web Worker first
+        if (this.useWorker && this.mpcWorker) {
+            // Request new plan if needed
+            if (this.framesSinceReplan >= this.replanInterval) {
+                this.requestMPCPlan(game, canvas);
+                this.framesSinceReplan = 0;
+            }
+            
+            // Use planned action from buffer
+            if (this.plannedActions.length > 0) {
+                const action = this.plannedActions.shift(); // Take first action
+                
+                // Convert MPC action to keys
+                this.keys = {};
+                if (action.thrust) this.keys.ArrowUp = true;
+                if (action.rotateLeft) this.keys.ArrowLeft = true;
+                if (action.rotateRight) this.keys.ArrowRight = true;
+                if (action.shoot) this.keys.Space = true;
+            } else {
+                // No action yet, use simple fallback
+                // Keep moving and rotate slowly while waiting for plan
+                this.keys = {
+                    ArrowUp: true,
+                    ArrowLeft: Math.random() < 0.05,
+                    ArrowRight: Math.random() < 0.05,
+                    Space: false
+                };
+            }
+            
+            this.framesSinceReplan++;
+            
+        } else {
+            // Fallback to synchronous MPC if worker not available
+            if (this.framesSinceReplan >= this.replanInterval || !this.currentPlan) {
+                // Create game state snapshot
+                const gameState = GameState.fromGame(game, canvas);
+                
+                // Get new plan from MPC (synchronous)
+                this.currentPlan = this.mpcPlanner.plan(gameState);
+                this.planIndex = 0;
+                this.framesSinceReplan = 0;
+                
+                // Debug logging
+                if (this.decisionsCount % 60 === 0) {
+                    console.log('MPC Plan Score (sync):', this.currentPlan.score);
+                }
+            }
+            
+            // Execute current action from plan
+            if (this.currentPlan && this.planIndex < this.currentPlan.actions.length) {
+                const action = this.currentPlan.actions[this.planIndex];
+                
+                // Convert MPC action to keys
+                this.keys = {};
+                if (action.thrust) this.keys.ArrowUp = true;
+                if (action.rotateLeft) this.keys.ArrowLeft = true;
+                if (action.rotateRight) this.keys.ArrowRight = true;
+                if (action.shoot) this.keys.Space = true;
+                
+                this.planIndex++;
+            }
+            
+            this.framesSinceReplan++;
+        }
+        
+        // Execute movement with the planned keys
         this.executeMovement(game);
     }
     
@@ -990,11 +1406,12 @@ class AIPlayer extends Ship {
         const totalAsteroids = game.asteroids.length;
         const onlyLargeLeft = game.asteroids.length > 0 && game.asteroids.every(a => a.size === 'large');
         
-        // Engage distances
+        // Engage distances (adjusted by aggression)
         const fewAsteroids = totalAsteroids <= 3;
-        const minSafe = target.size === 'large' ? (fewAsteroids ? 260 : 320) :
-                       target.size === 'medium' ? (fewAsteroids ? 140 : 180) :
-                       110;
+        const A = this.aggression();
+        const minSafe = (target.size === 'large' ? (fewAsteroids ? 260 : 320) :
+                        target.size === 'medium' ? (fewAsteroids ? 140 : 180) :
+                        110) / A;  // Get closer when buffed
         const maxRange = onlyLargeLeft ? 900 : 650;  // Let us shoot big rocks from farther
         const inRange = dist > minSafe && dist < maxRange;
         
@@ -1062,8 +1479,8 @@ class AIPlayer extends Ship {
         return base + needShield + bossBoost + manyRocks;
     }
     
-    // Find best power-up based on desirability and distance
-    findBestPowerUp(powerUps, canvas, game) {
+    // Find best power-up based on desirability, distance, urgency, and safety
+    findBestPowerUp(powerUps, canvas, game, immediateThreats) {
         let best = null;
         let bestScore = 0;
         
@@ -1072,7 +1489,15 @@ class AIPlayer extends Ship {
             if (distance > 900) continue; // Expanded search radius
             
             const desirability = this.powerUpDesire(p, game);
-            const score = desirability * (1.0 - distance / 900);
+            
+            // Time-aware urgency based on power-up lifetime
+            const ttlNorm = Math.max(0, Math.min(1, p.lifetime / 600)); // 600 frames base
+            const urgency = 1.2 + (1 - ttlNorm) * 1.0; // expiring soon → higher
+            
+            // Safety factor based on threats
+            const safety = 1 / (1 + (immediateThreats ? immediateThreats.length : 0));
+            
+            const score = desirability * (1.0 - distance / 900) * urgency * safety;
             
             if (score > bestScore) {
                 bestScore = score;
@@ -1119,26 +1544,61 @@ class AIPlayer extends Ship {
         return angle;
     }
     
+    // Momentum-aware helpers
+    velocityAngle() { 
+        return Math.atan2(this.vy, this.vx); 
+    }
+    
+    speed() { 
+        return Math.hypot(this.vx, this.vy); 
+    }
+    
+    brakeFramesFor(v) {
+        // approximate a_max per frame: thrust (0.5) + a bit of drag help
+        const a = 0.5 + 0.1; 
+        return Math.max(0, (v*v) / (2 * a)); // frames until stop if facing backwards
+    }
+    
+    // Arrive toward a point with side-slip cancellation
+    arriveController(toX, toY, canvas) {
+        const w = this.wrappedDistance(toX, toY, canvas);
+        const dist = Math.hypot(w.dx, w.dy);
+        const dir  = Math.atan2(w.dy, w.dx);
+        
+        // desired speed with slow radius
+        const vmax = 7.0;
+        const slowR = 220, stopR = 26;
+        const desiredSpeed = dist > slowR ? vmax
+                           : dist < stopR ? 0
+                           : vmax * (dist - stopR) / (slowR - stopR);
+        
+        // decompose current velocity into forward + lateral relative to goal
+        const vAngle = this.velocityAngle();
+        const v      = this.speed();
+        const angErr = this.normalizeAngle(dir - vAngle);
+        const forward = Math.cos(angErr) * v;
+        const lateral = Math.sin(angErr) * v;
+        
+        // heading: mostly goal direction, but add a small term to kill lateral slip
+        const slipKill = Math.atan2(-lateral, Math.max(1e-3, forward+1)); // nudge to remove side-slip
+        const heading  = this.normalizeAngle(dir + 0.35 * slipKill);
+        
+        // braking: if we'll overshoot, face reverse and thrust to brake
+        const brakeNow = this.brakeFramesFor(v) > dist && v > 1.2;
+        
+        return { heading, desiredSpeed, brakeNow, dist };
+    }
+    
     executeMovement(game) {
         if (this.keys.ArrowLeft) this.rotateLeft();
         if (this.keys.ArrowRight) this.rotateRight();
         
-        // Intelligent throttle control - ease off near danger
-        if (game && game.asteroids) {
-            const distances = game.asteroids.map(a => this.wrappedDistance(a.x, a.y, game.canvas).distance);
-            const nearest = Math.min(...distances.concat([Infinity]));
-            
-            // Dynamic safety bubble based on proximity
-            const safe = Math.max(140, Math.min(380, nearest - 80));
-            const desired = (nearest < 260) ? 2.8 : 7.0; // Bolder speeds: was 2.5 / 5.5
-            const speed = this.currentSpeed();
-            
-            // Only thrust if below desired speed
-            const allowThrust = speed < desired;
-            
-            if (this.keys.ArrowUp && !allowThrust) {
-                this.keys.ArrowUp = false; // Override thrust decision if going too fast
-            }
+        // Behavior-driven throttle: honor arrive/brake controller
+        const desired = (this._desiredSpeed ?? 7.0);
+        const speed   = this.currentSpeed();
+        const allowThrust = this._brakeNow ? true : (speed < desired);
+        if (this.keys.ArrowUp && !allowThrust) {
+            this.keys.ArrowUp = false;
         }
         
         if (this.keys.ArrowUp) {
@@ -1151,7 +1611,7 @@ class AIPlayer extends Ship {
             const now = performance.now();
             
             if (now >= this.aiNextFireAt) {
-                const cooldown = game.powerUpActive.rapidFire ? 50 : 200;
+                const cooldown = game.powerUpActive.rapidFire ? 50 : 140; // was 200
                 this.aiNextFireAt = now + cooldown;
                 
                 let fired = 0;
