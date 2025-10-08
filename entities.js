@@ -17,6 +17,13 @@ class Ship {
         this.thrusting = false;
         this.alive = true;
         
+        // Shield system
+        this.shieldHits = 0;  // Track shield hits
+        this.maxShieldHits = 3;  // Maximum hits shield can block
+        this.reflectBullets = false;  // Level 10 ability
+        this.shieldLevel = 1;  // Track shield level for abilities
+        this.hasShield = false;  // Whether shield is active
+        
         this.shipDesigns = {
             classic: {
                 points: [
@@ -348,123 +355,6 @@ class Asteroid {
         return this.points[this.size];
     }
 }
-
-class Boss {
-    constructor(x, y) {
-        this.x = x;
-        this.y = y;
-        this.vx = 0;
-        this.vy = 0;
-        this.radius = 40;
-        this.health = 10;
-        this.maxHealth = 10;
-        this.angle = 0;
-        this.targetAngle = 0;
-        this.speed = 2;
-        this.shootCooldown = 0;
-        this.shootInterval = 60;
-        this.alive = true;
-        this.points = 500;
-        
-        this.vertices = [
-            { x: 40, y: 0 },
-            { x: 20, y: -30 },
-            { x: -20, y: -30 },
-            { x: -40, y: 0 },
-            { x: -20, y: 30 },
-            { x: 20, y: 30 }
-        ];
-    }
-    
-    update(canvas, ship) {
-        const dx = ship.x - this.x;
-        const dy = ship.y - this.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        this.targetAngle = Math.atan2(dy, dx);
-        
-        const angleDiff = this.targetAngle - this.angle;
-        this.angle += angleDiff * 0.05;
-        
-        if (distance > 200) {
-            this.vx = Math.cos(this.angle) * this.speed;
-            this.vy = Math.sin(this.angle) * this.speed;
-        } else {
-            this.vx *= 0.95;
-            this.vy *= 0.95;
-        }
-        
-        this.x += this.vx;
-        this.y += this.vy;
-        
-        if (this.x < 0) this.x = canvas.width;
-        if (this.x > canvas.width) this.x = 0;
-        if (this.y < 0) this.y = canvas.height;
-        if (this.y > canvas.height) this.y = 0;
-        
-        this.shootCooldown--;
-    }
-    
-    draw(ctx, theme) {
-        ctx.save();
-        ctx.translate(this.x, this.y);
-        ctx.rotate(this.angle);
-        
-        const healthPercent = this.health / this.maxHealth;
-        const color = `hsl(${healthPercent * 120}, 100%, 50%)`;
-        
-        ctx.strokeStyle = color;
-        ctx.fillStyle = `hsla(${healthPercent * 120}, 100%, 50%, 0.2)`;
-        ctx.lineWidth = 3;
-        ctx.shadowBlur = 20;
-        ctx.shadowColor = color;
-        
-        ctx.beginPath();
-        ctx.moveTo(this.vertices[0].x, this.vertices[0].y);
-        for (let i = 1; i < this.vertices.length; i++) {
-            ctx.lineTo(this.vertices[i].x, this.vertices[i].y);
-        }
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        
-        ctx.fillStyle = '#ff0000';
-        ctx.beginPath();
-        ctx.arc(0, 0, 10, 0, Math.PI * 2);
-        ctx.fill();
-        
-        ctx.restore();
-        
-        ctx.save();
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-        ctx.fillRect(this.x - 40, this.y - 60, 80, 5);
-        ctx.fillStyle = '#ff0000';
-        ctx.fillRect(this.x - 40, this.y - 60, 80 * healthPercent, 5);
-        ctx.restore();
-    }
-    
-    shoot() {
-        if (this.shootCooldown <= 0) {
-            this.shootCooldown = this.shootInterval;
-            return new Bullet(
-                this.x + Math.cos(this.angle) * this.radius,
-                this.y + Math.sin(this.angle) * this.radius,
-                Math.cos(this.angle) * 8,
-                Math.sin(this.angle) * 8,
-                'boss'
-            );
-        }
-        return null;
-    }
-    
-    takeDamage(damage = 1) {
-        this.health -= damage;
-        if (this.health <= 0) {
-            this.alive = false;
-        }
-    }
-}
-
 class AIPlayer extends Ship {
     constructor(x, y, type = 'classic') {
         super(x, y, type);
@@ -533,16 +423,78 @@ class AIPlayer extends Ship {
     
     // Compute aim plan independent of movement action
     computeAimPlan(game, canvas) {
-        // 1) Choose target: small > medium > large, then nearest
-        const rocks = game.asteroids.slice().sort((a, b) => {
-            const rk = s => s === 'small' ? 0 : s === 'medium' ? 1 : 2;
-            const ra = rk(a.size), rb = rk(b.size);
-            const da = this.wrappedDistance(a.x, a.y, canvas).distance;
-            const db = this.wrappedDistance(b.x, b.y, canvas).distance;
-            return (ra - rb) || (da - db);
-        });
-        const target = rocks[0] || game.boss;
-        if (!target) return null;
+        // Boss-aware target scoring
+        const wantBoss = !!game.boss;
+        const wrapTo = (e) => this.wrappedDistance(e.x, e.y, canvas).distance;
+
+        let target = null;
+        let bestScore = -Infinity;
+
+        const ENGAGE_MIN = 400;   // start poking boss from here
+        const ENGAGE_MAX = 900;   // don't waste shots beyond this
+        const KEEP_OUT   = 180;   // never get closer than this to boss
+
+        // Enhanced scoring with alignment and difficulty factors
+        for (const a of game.asteroids) {
+            const wrapped = this.wrappedDistance(a.x, a.y, canvas);
+            const d = wrapped.distance;
+            
+            // Size priority: small > medium > large
+            const sizeRank = (a.size === 'small' ? 3 : a.size === 'medium' ? 2 : 1);
+            
+            // Calculate alignment factor (how well are we already aimed at it?)
+            const targetAngle = Math.atan2(wrapped.dy, wrapped.dx);
+            const alignmentError = Math.abs(this.normalizeAngle(targetAngle - this.angle));
+            const alignmentFactor = Math.max(0, 1 - alignmentError / Math.PI) * 20; // 0-20 bonus
+            
+            // Calculate intercept difficulty (how fast is it moving relative to us?)
+            const relativeSpeed = Math.hypot(a.vx - this.vx, a.vy - this.vy);
+            const difficultyFactor = Math.max(0, 10 - relativeSpeed * 0.5); // Prefer slower relative targets
+            
+            // Calculate threat level (is it coming toward us?)
+            const approach = this.closestApproach(a, a.vx, a.vy, canvas);
+            const threatBonus = (approach.dCPA2 < (this.radius + a.radius) * (this.radius + a.radius)) ? 15 : 0;
+            
+            // Distance factor with non-linear scaling
+            const distancePenalty = d < 200 ? 0 : Math.min(30, (d - 200) * 0.05);
+            
+            // Combined score
+            const score = sizeRank * 10 + alignmentFactor + difficultyFactor + threatBonus - distancePenalty;
+            
+            if (score > bestScore) { 
+                bestScore = score; 
+                target = a; 
+            }
+        }
+
+        // Score boss if present and within engagement ring
+        if (wantBoss) {
+            const wrapped = this.wrappedDistance(game.boss.x, game.boss.y, canvas);
+            const dBoss = wrapped.distance;
+            const inRing = dBoss >= ENGAGE_MIN && dBoss <= ENGAGE_MAX;
+            const tooClose = dBoss < KEEP_OUT;
+
+            if (!tooClose && inRing) {
+                // Enhanced boss scoring with alignment
+                const bossAngle = Math.atan2(wrapped.dy, wrapped.dx);
+                const alignmentError = Math.abs(this.normalizeAngle(bossAngle - this.angle));
+                const alignmentBonus = Math.max(0, 1 - alignmentError / Math.PI) * 30;
+                
+                // Prefer optimal engagement distance (middle of ring)
+                const optimalDist = (ENGAGE_MIN + ENGAGE_MAX) / 2;
+                const distScore = Math.max(0, 50 - Math.abs(dBoss - optimalDist) * 0.1);
+                
+                const bossScore = 80 + alignmentBonus + distScore;
+                if (bossScore > bestScore) { 
+                    bestScore = bossScore; 
+                    target = game.boss; 
+                }
+            }
+        }
+
+        // If still nothing (e.g., no rocks), fall back to boss anyway
+        if (!target && wantBoss) target = game.boss;
+        if (!target) return null;  // no shooting plan
         
         // 2) Exact first-order intercept
         const s = 15; // bullet speed
@@ -558,11 +510,18 @@ class AIPlayer extends Ship {
             aimAngle = Math.atan2(w.dy, w.dx);
         }
         
-        // 3) Distance gates (smalls allowed close)
+        // 3) Distance gates (smalls allowed close, boss has special handling)
         const dist = this.wrappedDistance(target.x, target.y, canvas).distance;
-        const minSafe = target.size === 'large' ? 280 : target.size === 'medium' ? 120 : 0; // Let smalls be point-blank
-        const onlyLarge = game.asteroids.length > 0 && game.asteroids.every(a => a.size === 'large');
-        const maxRange = onlyLarge ? 900 : 700;
+        let minSafe, maxRange;
+        
+        if (target === game.boss) {
+            minSafe = KEEP_OUT;
+            maxRange = ENGAGE_MAX;
+        } else {
+            minSafe = target.size === 'large' ? 280 : target.size === 'medium' ? 120 : 0;
+            const onlyLarge = game.asteroids.length > 0 && game.asteroids.every(a => a.size === 'large');
+            maxRange = onlyLarge ? 900 : 700;
+        }
         
         return {
             target,
@@ -707,8 +666,31 @@ class AIPlayer extends Ship {
         // Reset keys at the START, not at the end
         this.keys = {};
         
+        // Apply first MPC action if available (movement only)
+        if (game && game._mpcPlan && game._mpcPlan.seq.length) {
+            const a = game._mpcPlan.seq[game._mpcPlan.i] ?? 0;
+            // map action id -> keys
+            const apply = (k)=> this.keys = { ...this.keys, ...k };
+            if (a===1) apply({ArrowUp:true});
+            if (a===2) apply({ArrowLeft:true});
+            if (a===3) apply({ArrowRight:true});
+            if (a===4) apply({ArrowUp:true, ArrowLeft:true});
+            if (a===5) apply({ArrowUp:true, ArrowRight:true});
+            game._mpcPlan.i = Math.min(game._mpcPlan.seq.length-1, game._mpcPlan.i+1);
+        }
+        
         // Compute aim plan first (independent of movement)
         const plan = this.computeAimPlan(game, canvas);
+        
+        // Check for boss proximity emergency
+        const BOSS_KEEP_OUT = 180;
+        let bossEmergency = false;
+        if (boss) {
+            const bossDist = this.wrappedDistance(boss.x, boss.y, canvas).distance;
+            if (bossDist < BOSS_KEEP_OUT) {
+                bossEmergency = true;
+            }
+        }
         
         const threats = this.assessThreats(asteroids, boss, game.bullets, canvas);
         // Check for emergency threats (very close)
@@ -721,9 +703,9 @@ class AIPlayer extends Ship {
         
         // Calculate utility scores for each action
         this.actionUtilities = {
-            evade: emergencyThreats.length * 0.5 + immediateThreats.length * 0.25,
+            evade: emergencyThreats.length * 0.5 + immediateThreats.length * 0.25 + (bossEmergency ? 2.0 : 0),
             avoid: immediateThreats.length * 0.15,
-            hunt: threats.length >= 1 && emergencyThreats.length === 0 ? 0.55 : 0,
+            hunt: threats.length >= 1 && emergencyThreats.length === 0 && !bossEmergency ? 0.55 : 0,
             collectPowerup: 0,
             patrol: threats.length === 0 ? 0.25 : 0
         };
@@ -759,27 +741,33 @@ class AIPlayer extends Ship {
             });
         }
         
-        // Execute the best action (only one at a time for clarity)
-        switch(this.currentAction) {
-            case 'evade':
-                this.emergencyEvade(emergencyThreats.length > 0 ? emergencyThreats : bulletThreats);
-                break;
-            case 'avoid':
-                this.avoidThreats(immediateThreats);
-                break;
-            case 'hunt':
-                // Always hunt, even during danger
-                this.huntTargets(threats, boss, game, canvas);
-                break;
-            case 'collectPowerup':
-                // targetPowerUp already set in utility calculation
-                if (this.targetPowerUp) {
-                    this.navigateToPowerUp(this.targetPowerUp, canvas);
-                }
-                break;
-            case 'patrol':
-                // Just drift for now
-                break;
+        // Only override MPC if we don't have a plan or in emergency situations
+        const hasMpcPlan = game && game._mpcPlan && game._mpcPlan.seq.length > 0;
+        const shouldOverrideMpc = !hasMpcPlan || this.currentAction === 'evade' || bossEmergency;
+        
+        // Execute the best action (only if we should override MPC)
+        if (shouldOverrideMpc) {
+            switch(this.currentAction) {
+                case 'evade':
+                    this.emergencyEvade(emergencyThreats.length > 0 ? emergencyThreats : bulletThreats);
+                    break;
+                case 'avoid':
+                    this.avoidThreats(immediateThreats);
+                    break;
+                case 'hunt':
+                    // Always hunt, even during danger
+                    this.huntTargets(threats, boss, game, canvas);
+                    break;
+                case 'collectPowerup':
+                    // targetPowerUp already set in utility calculation
+                    if (this.targetPowerUp) {
+                        this.navigateToPowerUp(this.targetPowerUp, canvas);
+                    }
+                    break;
+                case 'patrol':
+                    // Just drift for now
+                    break;
+            }
         }
         
         if (this.decisionCooldown <= 0) {
@@ -884,16 +872,22 @@ class AIPlayer extends Ship {
         }
         
         if (boss) {
-            const dx = boss.x - this.x;
-            const dy = boss.y - this.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
+            const wrapped = this.wrappedDistance(boss.x, boss.y, canvas);
+            const distance = wrapped.distance;
+            const BOSS_KEEP_OUT = 180;  // Keep-out zone for boss
+            
+            // Treat boss as having a larger effective radius for threat assessment
+            const effectiveRadius = (boss.radius || 40) + BOSS_KEEP_OUT;
+            
             threats.push({
                 entity: boss,
                 distance,
                 timeToCollision: distance / 5,
                 futureDistance: distance,
-                priority: 1000 / distance,
-                angle: Math.atan2(dy, dx)
+                priority: distance < effectiveRadius ? 2000 / (distance + 1) : 1000 / distance,
+                angle: Math.atan2(wrapped.dy, wrapped.dx),
+                radius: effectiveRadius,  // Use expanded radius for collision avoidance
+                type: 'boss'
             });
         }
         
@@ -971,6 +965,7 @@ class AIPlayer extends Ship {
         const target = interesting[0]?.entity || boss;
         if (!target) return;
         
+        const isBoss = target === boss;
         const bulletSpeed = 15;
         const sol = this.solveInterceptWrapped(target, bulletSpeed, canvas);
         if (!sol) return;
@@ -986,46 +981,101 @@ class AIPlayer extends Ship {
             maxTurn: this.rotationSpeed * 3
         });
         
-        const dist = this.wrappedDistance(target.x, target.y, canvas).distance;
+        const wrapped = this.wrappedDistance(target.x, target.y, canvas);
+        const dist = wrapped.distance;
         const totalAsteroids = game.asteroids.length;
         const onlyLargeLeft = game.asteroids.length > 0 && game.asteroids.every(a => a.size === 'large');
         
-        // Engage distances
-        const fewAsteroids = totalAsteroids <= 3;
-        const minSafe = target.size === 'large' ? (fewAsteroids ? 260 : 320) :
-                       target.size === 'medium' ? (fewAsteroids ? 140 : 180) :
-                       110;
-        const maxRange = onlyLargeLeft ? 900 : 650;  // Let us shoot big rocks from farther
-        const inRange = dist > minSafe && dist < maxRange;
-        
-        // "Cleanup" bias for small shards
-        const smallCount = game.asteroids.filter(a => a.size === 'small').length;
-        const cleanup = smallCount >= 4;
-        
-        // Be willing to shoot large rocks earlier when they're all that exists
-        const largeKick = (onlyLargeLeft && Math.abs(this.normalizeAngle(aimAngle - this.angle)) < 0.35);
-        
-        // Debug shooting logic
-        if (this.decisionsCount % 30 === 0) {
-            console.log('Aimbot debug:', {
-                targetSize: target.size,
-                interceptTime: tFrames.toFixed(2),
-                distance: dist.toFixed(1),
-                aligned,
-                okLifetime,
-                inRange,
-                cleanup,
-                onlyLargeLeft,
-                largeKick
-            });
+        // Boss standoff enforcement
+        if (isBoss) {
+            const ENGAGE_MIN = 400;
+            const ENGAGE_MAX = 900;
+            const KEEP_OUT = 180;
+            
+            const inRange = dist > ENGAGE_MIN && dist < ENGAGE_MAX;
+            
+            if (okLifetime && inRange && aligned) {
+                this.keys = { ...this.keys, Space: true };
+            }
+            
+            // CRITICAL: Enforce tangential movement when engaging boss
+            if (dist < ENGAGE_MAX) {
+                // Calculate radial and tangential components
+                const dx = wrapped.dx;
+                const dy = wrapped.dy;
+                const radialAngle = Math.atan2(dy, dx);
+                
+                // Calculate our velocity's radial component (negative = closing in)
+                const rx = dx / (dist + 1e-6);
+                const ry = dy / (dist + 1e-6);
+                const vr = this.vx * rx + this.vy * ry;
+                
+                // If we're too close or moving toward boss, enforce tangential movement
+                if (dist < ENGAGE_MIN || vr < -1) {
+                    // Tangential angle is 90 degrees from radial
+                    // Choose direction based on current velocity to maintain orbit
+                    const vt = this.vx * (-ry) + this.vy * rx; // tangential velocity
+                    const tangentAngle = radialAngle + (vt >= 0 ? Math.PI/2 : -Math.PI/2);
+                    
+                    // Rotate toward tangent direction
+                    this.rotateToAnglePD(tangentAngle, {
+                        kp: 0.8,
+                        kd: 0.3,
+                        maxTurn: this.rotationSpeed * 4
+                    });
+                    
+                    // Thrust to maintain orbit
+                    this.keys = { ...this.keys, ArrowUp: true };
+                } else if (dist > ENGAGE_MAX - 100) {
+                    // If we're getting too far, move inward carefully
+                    const approachAngle = radialAngle;
+                    const angleError = Math.abs(this.normalizeAngle(approachAngle - this.angle));
+                    
+                    if (angleError < 0.3) {
+                        // Only thrust toward boss if we're aligned
+                        this.keys = { ...this.keys, ArrowUp: true };
+                    }
+                }
+            }
+        } else {
+            // Regular asteroid hunting
+            // Engage distances
+            const fewAsteroids = totalAsteroids <= 3;
+            const minSafe = target.size === 'large' ? (fewAsteroids ? 260 : 320) :
+                           target.size === 'medium' ? (fewAsteroids ? 140 : 180) :
+                           110;
+            const maxRange = onlyLargeLeft ? 900 : 650;  // Let us shoot big rocks from farther
+            const inRange = dist > minSafe && dist < maxRange;
+            
+            // "Cleanup" bias for small shards
+            const smallCount = game.asteroids.filter(a => a.size === 'small').length;
+            const cleanup = smallCount >= 4;
+            
+            // Be willing to shoot large rocks earlier when they're all that exists
+            const largeKick = (onlyLargeLeft && Math.abs(this.normalizeAngle(aimAngle - this.angle)) < 0.35);
+            
+            // Debug shooting logic
+            if (this.decisionsCount % 30 === 0) {
+                console.log('Aimbot debug:', {
+                    targetSize: target.size,
+                    interceptTime: tFrames.toFixed(2),
+                    distance: dist.toFixed(1),
+                    aligned,
+                    okLifetime,
+                    inRange,
+                    cleanup,
+                    onlyLargeLeft,
+                    largeKick
+                });
+            }
+            
+            if (okLifetime && inRange && (aligned || cleanup || largeKick)) {
+                this.keys = { ...this.keys, Space: true };
+            }
+            
+            // Close distance so fragments don't accumulate
+            this.keys = { ...this.keys, ArrowUp: true };
         }
-        
-        if (okLifetime && inRange && (aligned || cleanup || largeKick)) {
-            this.keys = { ...this.keys, Space: true };
-        }
-        
-        // Close distance so fragments don't accumulate
-        this.keys = { ...this.keys, ArrowUp: true };
     }
     
     navigateToPowerUp(powerUp, canvas) {
@@ -1191,16 +1241,32 @@ class PowerUp {
         this.rotation = 0;
         
         this.types = {
-            shield: { icon: '🛡️', color: '#00ff00', duration: 7500 },  // 75% of 10000
-            rapidFire: { icon: '⚡', color: '#ffff00', duration: 5000 },
+            shield: { icon: '🛡️', color: '#00ff00', duration: 2250 },  // 30% of original 7500
+            rapidFire: { icon: '⚡', color: '#ffff00', duration: 5000, hasSprite: true },
             tripleShot: { icon: '🔱', color: '#ff00ff', duration: 5000 },
-            slowTime: { icon: '⏱️', color: '#00ffff', duration: 3000 },
-            laser: { icon: '🔦', color: '#ff0000', duration: 6000 },  // 50% increase
+            slowTime: { icon: '⏱️', color: '#00ffff', duration: 900 },  // 30% of original 3000
+            companion: { icon: '🤖', color: '#00ffaa', duration: 8000 },
             bomb: { icon: '💣', color: '#ff8800', duration: 0 },  // Stackable
-            speedBoost: { icon: '🚀', color: '#00ffff', duration: 7500 },  // 25% increase
+            speedBoost: { icon: '🚀', color: '#00ffff', duration: 7500 },
             doublePoints: { icon: '💎', color: '#ffff00', duration: 8000 },
             autoAim: { icon: '🎯', color: '#ff00ff', duration: 7000 },
-            extraLife: { icon: '❤️', color: '#ff0000', duration: 0 }  // Instant use
+            extraLife: { icon: '❤️', color: '#ff0000', duration: 0 },  // Instant use
+            doubleDamage: { icon: '⚔️', color: '#ff4444', duration: 5000 }  // New power-up
+        };
+        
+        // Initialize sprite loading for rapid fire
+        if (this.type === 'rapidFire') {
+            this.loadSprite();
+        }
+    }
+    
+    loadSprite() {
+        // For power-up pickup, always show level 1 sprite
+        this.sprite = new Image();
+        this.sprite.src = 'Assets/Rapid_fire_1.png';
+        this.spriteLoaded = false;
+        this.sprite.onload = () => {
+            this.spriteLoaded = true;
         };
     }
     
@@ -1217,6 +1283,7 @@ class PowerUp {
         
         const powerupInfo = this.types[this.type];
         
+        // Draw hexagon background
         ctx.strokeStyle = powerupInfo.color;
         ctx.fillStyle = powerupInfo.color + '33';
         ctx.lineWidth = 2;
@@ -1235,11 +1302,19 @@ class PowerUp {
         ctx.fill();
         ctx.stroke();
         
-        ctx.font = '20px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#fff';
-        ctx.fillText(powerupInfo.icon, 0, 0);
+        // Draw sprite or icon
+        if (this.type === 'rapidFire' && this.spriteLoaded) {
+            // Draw sprite for rapid fire
+            const size = this.radius * 1.5;
+            ctx.drawImage(this.sprite, -size/2, -size/2, size, size);
+        } else {
+            // Draw icon for other power-ups
+            ctx.font = '20px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#fff';
+            ctx.fillText(powerupInfo.icon, 0, 0);
+        }
         
         ctx.restore();
     }

@@ -229,9 +229,20 @@ class UI {
         return themes[this.currentTheme];
     }
     
+    formatNumber(num) {
+        if (num >= 1e9) {
+            return (num / 1e9).toFixed(2) + 'B';
+        } else if (num >= 1e6) {
+            return (num / 1e6).toFixed(2) + 'M';
+        } else if (num >= 1e3) {
+            return (num / 1e3).toFixed(1) + 'K';
+        }
+        return num.toLocaleString();
+    }
+    
     updateScore(points) {
         this.score += points;
-        document.getElementById('score').textContent = this.score;
+        document.getElementById('score').textContent = this.formatNumber(this.score);
         
         if (this.score > this.highScore) {
             this.highScore = this.score;
@@ -239,15 +250,28 @@ class UI {
         }
     }
     
-    updateLives(lives) {
+    updateLives(lives, strongHearts = 0) {
         this.lives = lives;
         const livesContainer = document.getElementById('lives');
         livesContainer.innerHTML = '';
         
-        for (let i = 0; i < lives; i++) {
-            const lifeIcon = document.createElement('div');
-            lifeIcon.className = 'life-icon';
-            livesContainer.appendChild(lifeIcon);
+        if (lives <= 10) {
+            // Show individual heart icons for 10 or fewer
+            for (let i = 0; i < lives; i++) {
+                const lifeIcon = document.createElement('div');
+                lifeIcon.className = strongHearts > i ? 'life-icon strong' : 'life-icon';
+                livesContainer.appendChild(lifeIcon);
+            }
+        } else {
+            // Show number format for more than 10
+            const heartsDisplay = document.createElement('div');
+            heartsDisplay.className = 'lives-number';
+            if (strongHearts > 0) {
+                heartsDisplay.innerHTML = `<span class="heart-emoji">❤️‍🔥</span> x${strongHearts} <span class="heart-emoji">❤️</span> x${lives - strongHearts}`;
+            } else {
+                heartsDisplay.innerHTML = `<span class="heart-emoji">❤️</span> x${lives}`;
+            }
+            livesContainer.appendChild(heartsDisplay);
         }
     }
     
@@ -257,7 +281,7 @@ class UI {
     }
     
     updateHighScore() {
-        document.getElementById('highScoreValue').textContent = this.highScore;
+        document.getElementById('highScoreValue').textContent = this.formatNumber(this.highScore);
         localStorage.setItem('asteroidsHighScore', this.highScore);
     }
     
@@ -294,7 +318,7 @@ class UI {
         this.clearPowerUps();
     }
     
-    addPowerUp(type, duration) {
+    addPowerUp(type, duration, stackCount = 1, level = 1) {
         const powerUpDisplay = document.getElementById('powerup-display');
         
         if (this.powerUps[type]) {
@@ -311,18 +335,38 @@ class UI {
             rapidFire: '⚡',
             tripleShot: '🔱',
             slowTime: '⏱️',
-            laser: '🔦',
+            companion: '🤖',
             speedBoost: '🚀',
             doublePoints: '💎',
             autoAim: '🎯',
-            extraLife: '❤️'
+            extraLife: '❤️',
+            doubleDamage: '⚔️'
             // bomb is handled separately with counter
         };
         
-        powerUpElement.innerHTML = `
-            ${icons[type]}
-            <div class="powerup-timer"></div>
-        `;
+        // Show stack count if > 1
+        const stackDisplay = stackCount > 1 ? `<span class="stack-count">x${stackCount}</span>` : '';
+        
+        // Use sprite for rapid fire based on level
+        if (type === 'rapidFire') {
+            let spriteLevel = 1;
+            if (level >= 25) spriteLevel = 25;
+            else if (level >= 20) spriteLevel = 20;
+            else if (level >= 15) spriteLevel = 15;
+            else if (level >= 10) spriteLevel = 10;
+            else if (level >= 5) spriteLevel = 5;
+            
+            powerUpElement.innerHTML = `
+                <img src="Assets/Rapid_fire_${spriteLevel}.png" alt="Rapid Fire" style="width: 30px; height: 30px; vertical-align: middle;">
+                ${stackDisplay}
+                <div class="powerup-timer"></div>
+            `;
+        } else {
+            powerUpElement.innerHTML = `
+                ${icons[type]}${stackDisplay}
+                <div class="powerup-timer"></div>
+            `;
+        }
         
         powerUpDisplay.appendChild(powerUpElement);
         
